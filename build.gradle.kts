@@ -1,0 +1,97 @@
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
+
+plugins {
+    java
+    id("org.jetbrains.intellij.platform")
+}
+
+group = "com.archscope"
+version = "0.7.2"
+
+dependencies {
+    intellijPlatform {
+        intellijIdeaCommunity("2024.3.6")
+        pluginVerifier()
+        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
+    }
+
+    implementation("com.google.code.gson:gson:2.11.0")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    testRuntimeOnly("junit:junit:4.13.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.11.4")
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks {
+    withType<JavaCompile>().configureEach {
+        options.encoding = "UTF-8"
+        options.release = 21
+        options.compilerArgs.add("-Xlint:deprecation")
+    }
+
+    test {
+        useJUnitPlatform()
+        for (name in listOf(
+            "archscope.benchmarkRepo",
+            "archscope.benchmarkOutput",
+            "archscope.benchmarkCommits",
+            "archscope.cacheDir",
+            "archscope.reportArchiveDir",
+            "archscope.previewInput",
+            "archscope.previewOutput",
+            "archscope.previewDark",
+            "archscope.domainBenchmarkRepo",
+            "archscope.domainBenchmarkPrompt",
+            "archscope.domainBenchmarkOutput",
+            "archscope.domainBenchmarkHtmlOutput",
+            "archscope.domainCustomPrompt",
+            "archscope.domainBusinessContext",
+            "archscope.domainCodeReadingPrompt",
+            "archscope.domainSystemPrompt",
+            "archscope.domainRefinePrompt",
+            "archscope.domainRefineInput",
+            "archscope.domainRefineOutput",
+            "archscope.domainRefineHtmlOutput",
+            "archscope.modelProvider"
+        )) {
+            System.getProperty(name)?.let { systemProperty(name, it) }
+        }
+        testLogging.showStandardStreams = true
+    }
+
+    patchPluginXml {
+        sinceBuild = "243"
+    }
+
+}
+
+intellijPlatform {
+    pluginConfiguration {
+        name = "AI Code Review & Understanding"
+        version = project.version.toString()
+        description = """
+            Analyze selected Git changes or a user-defined business topic with a configurable
+            model provider, then refine evidence-backed business-flow reports interactively.
+        """.trimIndent()
+
+        ideaVersion {
+            sinceBuild = "243"
+        }
+
+        vendor {
+            name = "AI Code Review & Understanding"
+        }
+    }
+
+    pluginVerification {
+        ides {
+            create(IntelliJPlatformType.IntellijIdeaCommunity, "2024.3.6")
+            create(IntelliJPlatformType.GoLand, "2024.3.6")
+        }
+    }
+}

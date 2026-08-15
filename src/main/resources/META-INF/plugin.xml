@@ -1,0 +1,40 @@
+<idea-plugin>
+    <id>com.archscope.jetbrains</id>
+    <name>AI Code Review &amp; Understanding</name>
+    <vendor>AI Code Review &amp; Understanding</vendor>
+
+    <description><![CDATA[
+        Analyze selected Git changes or a user-defined business topic, then refine the resulting
+        business-domain and end-to-end flow report interactively. Model execution is provider-neutral;
+        the bundled default adapter uses an authenticated local Codex CLI.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileEditorProvider implementation="com.archscope.jetbrains.ui.ArchitectureReportFileEditorProvider"/>
+        <toolWindow
+                id="AI Code Review &amp; Understanding"
+                anchor="right"
+                icon="/icons/archscope.svg"
+                factoryClass="com.archscope.jetbrains.ui.ArchitectureToolWindowFactory"/>
+    </extensions>
+
+    <actions>
+        <action
+                id="ArchScope.OpenToolWindow"
+                class="com.archscope.jetbrains.ui.OpenArchScopeAction"
+                text="Open AI Code Review &amp; Understanding"
+                description="Select Git commits and generate an architecture review">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+        <action
+                id="ArchScope.AnalyzeGitLogSelection"
+                class="com.archscope.jetbrains.ui.AnalyzeGitLogSelectionAction"
+                text="AI 分析选中提交"
+                description="分析 Git 日志中选中的一条或多条提交"
+                icon="/icons/archscope.svg">
+            <add-to-group group-id="Vcs.Log.ContextMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
