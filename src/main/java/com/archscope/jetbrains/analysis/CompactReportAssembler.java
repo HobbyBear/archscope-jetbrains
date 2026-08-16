@@ -17,6 +17,7 @@ import java.util.Set;
 
 public final class CompactReportAssembler {
     public JsonObject assemble(String raw, AnalysisRequest request, EvidencePack evidence) throws ModelClientException {
+        boolean english = request.outputLanguage().isEnglish();
         JsonObject analysis = parse(raw);
         if (!"closed-change-analysis/v1".equals(string(analysis, "schema"))) {
             throw new ModelClientException("Codex 闭合分析 schema 无效");
@@ -29,12 +30,13 @@ public final class CompactReportAssembler {
         JsonObject report = new JsonObject();
         report.addProperty("schema", "code-architecture-report/v1");
         report.addProperty("source_format", "code-change-walkthrough/v2");
-        report.addProperty("title", fallback(string(analysis, "title"), "所选提交组合变更"));
-        report.addProperty("summary", fallback(string(analysis, "summary"), "所选提交的聚合行为变化。"));
+        report.addProperty("title", fallback(string(analysis, "title"), english ? "Selected commit changes" : "所选提交组合变更"));
+        report.addProperty("summary", fallback(string(analysis, "summary"), english ? "Combined behavioral changes from the selected commits." : "所选提交的聚合行为变化。"));
+        report.addProperty("output_language", request.outputLanguage().code());
 
         JsonObject focus = new JsonObject();
-        focus.addProperty("title", "所选提交组合变更");
-        focus.addProperty("description", request.focus());
+        focus.addProperty("title", english ? "Selected commit changes" : "所选提交组合变更");
+        focus.addProperty("description", english ? string(report, "summary") : request.focus());
         report.add("analysis_focus", focus);
         JsonObject guide = new JsonObject();
         guide.addProperty("title", string(report, "title"));
@@ -58,7 +60,7 @@ public final class CompactReportAssembler {
             String sourceGroupId = string(group, "id");
             JsonObject feature = new JsonObject();
             feature.addProperty("id", groupId);
-            feature.addProperty("name", fallback(string(group, "title"), "改动主题 " + (groupIndex + 1)));
+            feature.addProperty("name", fallback(string(group, "title"), (english ? "Change topic " : "改动主题 ") + (groupIndex + 1)));
             feature.addProperty("summary", fallback(string(group, "summary"), string(group, "after")));
             features.add(feature);
 
@@ -73,8 +75,8 @@ public final class CompactReportAssembler {
                 JsonObject step = stepObjects.get(stepIndex);
                 String nodeId = "node-" + (groupIndex + 1) + "-" + (stepIndex + 1);
                 String flowId = "flow-" + (groupIndex + 1) + "-" + (stepIndex + 1);
-                String module = fallback(string(step, "module"), moduleFromPath(string(step, "file")));
-                Lane lane = lanes.computeIfAbsent(module, key -> new Lane("lane-" + (lanes.size() + 1), module));
+                String module = fallback(string(step, "module"), moduleFromPath(string(step, "file"), english));
+                Lane lane = lanes.computeIfAbsent(module, key -> new Lane("lane-" + (lanes.size() + 1), module, english));
                 lane.addNode(nodeId, fallback(string(step, "responsibility"), string(step, "summary")),
                         string(step, "module_role"), strings(array(step, "inputs")), strings(array(step, "outputs")));
 
@@ -127,9 +129,9 @@ public final class CompactReportAssembler {
                 flow.addProperty("change_status", changed ? "changed" : normalizeChangeStatus(string(step, "change_status")));
                 flow.add("commit_ids", strings(changed ? stepCommits : groupCommitIds));
                 JsonObject detail = new JsonObject();
-                detail.addProperty("before", fallback(string(group, "before"), "未在证据中确认"));
+                detail.addProperty("before", fallback(string(group, "before"), english ? "Not confirmed by the evidence" : "未在证据中确认"));
                 detail.addProperty("after", fallback(string(group, "after"), string(step, "summary")));
-                detail.addProperty("reason", fallback(string(group, "reason"), "所选提交引入"));
+                detail.addProperty("reason", fallback(string(group, "reason"), english ? "Introduced by the selected commits" : "所选提交引入"));
                 detail.addProperty("impact", fallback(string(group, "impact"), string(group, "summary")));
                 detail.add("commit_ids", strings(changed ? stepCommits : groupCommitIds));
                 flow.add("change_detail", detail);
@@ -157,7 +159,7 @@ public final class CompactReportAssembler {
                     edge.add("scenario_ids", new JsonArray());
                     edge.addProperty("number", String.valueOf(stepIndex));
                     edge.addProperty("kind", normalizeRelation(string(step, "relation_kind")));
-                    edge.addProperty("label", fallback(string(step, "relation_label"), "进入下一步骤"));
+                    edge.addProperty("label", fallback(string(step, "relation_label"), english ? "Continue to the next step" : "进入下一步骤"));
                     edge.addProperty("payload", strings(array(previousStep, "outputs")).stream().findFirst().orElse(""));
                     edge.addProperty("meaning", fallback(string(step, "relation_label"), string(step, "summary")));
                     edge.addProperty("evidence_kind", "inferred");
@@ -169,13 +171,13 @@ public final class CompactReportAssembler {
                         String contractId = "contract-" + (groupIndex + 1) + "-" + stepIndex;
                         JsonObject contract = new JsonObject();
                         contract.addProperty("id", contractId);
-                        contract.addProperty("name", fallback(string(step, "relation_label"), "跨模块调用"));
+                        contract.addProperty("name", fallback(string(step, "relation_label"), english ? "Cross-module call" : "跨模块调用"));
                         contract.addProperty("source_lane_id", previousLane);
                         contract.addProperty("target_lane_id", lane.id);
                         contract.addProperty("kind", normalizeRelation(string(step, "relation_kind")));
                         contract.addProperty("payload", edge.get("payload").getAsString());
                         contract.addProperty("meaning", edge.get("meaning").getAsString());
-                        contract.addProperty("lifecycle", "本次业务步骤内");
+                        contract.addProperty("lifecycle", english ? "Within this business step" : "本次业务步骤内");
                         contract.add("source_node_ids", strings("node-" + (groupIndex + 1) + "-" + stepIndex, nodeId));
                         contracts.add(contract);
                         stepFlows.get(stepIndex - 1).getAsJsonArray("contract_out_ids").add(contractId);
@@ -187,7 +189,7 @@ public final class CompactReportAssembler {
             if (!stepFlows.isEmpty()) {
                 JsonObject groupFlow = new JsonObject();
                 groupFlow.addProperty("id", "flow-group-" + (groupIndex + 1));
-                groupFlow.addProperty("title", fallback(string(group, "title"), "改动主题"));
+                groupFlow.addProperty("title", fallback(string(group, "title"), english ? "Change topic" : "改动主题"));
                 groupFlow.addProperty("summary", fallback(string(group, "summary"), string(group, "impact")));
                 groupFlow.addProperty("kind", "stage");
                 groupFlow.addProperty("lane_id", stepLaneIds.get(0));
@@ -195,9 +197,9 @@ public final class CompactReportAssembler {
                 groupFlow.addProperty("flow_scope", "business");
                 groupFlow.add("commit_ids", strings(groupCommitIds));
                 JsonObject groupDetail = new JsonObject();
-                groupDetail.addProperty("before", fallback(string(group, "before"), "未在证据中确认"));
+                groupDetail.addProperty("before", fallback(string(group, "before"), english ? "Not confirmed by the evidence" : "未在证据中确认"));
                 groupDetail.addProperty("after", fallback(string(group, "after"), string(group, "summary")));
-                groupDetail.addProperty("reason", fallback(string(group, "reason"), "所选提交引入"));
+                groupDetail.addProperty("reason", fallback(string(group, "reason"), english ? "Introduced by the selected commits" : "所选提交引入"));
                 groupDetail.addProperty("impact", fallback(string(group, "impact"), string(group, "summary")));
                 groupDetail.add("commit_ids", strings(groupCommitIds));
                 groupFlow.add("change_detail", groupDetail);
@@ -213,8 +215,8 @@ public final class CompactReportAssembler {
 
         JsonObject design = new JsonObject();
         JsonArray principles = new JsonArray();
-        principles.add("报告以所选提交的聚合净差异为中心，独立改动主题并列展示。");
-        principles.add("只保留解释修改前后行为所需的最短证据路径。");
+        principles.add(english ? "The report centers on the combined net diff and presents independent change topics in parallel." : "报告以所选提交的聚合净差异为中心，独立改动主题并列展示。");
+        principles.add(english ? "Only the shortest evidence path needed to explain behavior before and after the change is retained." : "只保留解释修改前后行为所需的最短证据路径。");
         design.add("principles", principles);
         JsonArray laneArray = new JsonArray();
         lanes.values().forEach(lane -> laneArray.add(lane.toJson()));
@@ -251,8 +253,8 @@ public final class CompactReportAssembler {
         report.add("tables", new JsonArray());
         report.add("evidence", new JsonArray());
         report.add("unknowns", copy(array(analysis, "unknowns")));
-        report.add("commit_evolution", commitEvolution(analysis, evidence, changedNodeIdsByCommit, changedPathsByCommit));
-        report.add("review_findings", findings(analysis, nodeIdsByGroup, evidence));
+        report.add("commit_evolution", commitEvolution(analysis, evidence, changedNodeIdsByCommit, changedPathsByCommit, english));
+        report.add("review_findings", findings(analysis, nodeIdsByGroup, evidence, english));
 
         JsonObject summary = new JsonObject();
         summary.addProperty("headline", string(report, "title"));
@@ -301,7 +303,8 @@ public final class CompactReportAssembler {
             JsonObject analysis,
             EvidencePack evidence,
             Map<String, List<String>> nodesByCommit,
-            Map<String, LinkedHashSet<String>> pathsByCommit
+            Map<String, LinkedHashSet<String>> pathsByCommit,
+            boolean english
     ) {
         Map<String, JsonObject> notes = new HashMap<>();
         for (JsonObject note : objects(array(analysis, "commit_notes"))) notes.put(string(note, "commit"), note);
@@ -313,7 +316,7 @@ public final class CompactReportAssembler {
             item.addProperty("commit", hash);
             item.addProperty("subject", commit.commit().subject());
             item.addProperty("business_purpose", fallback(string(note, "business_purpose"), commit.commit().subject()));
-            item.addProperty("architecture_effect", fallback(string(note, "architecture_effect"), "修改现有业务行为"));
+            item.addProperty("architecture_effect", fallback(string(note, "architecture_effect"), english ? "Changes existing business behavior" : "修改现有业务行为"));
             item.add("affected_node_ids", strings(nodesByCommit.getOrDefault(hash, List.of())));
             item.add("evidence_paths", strings(pathsByCommit.getOrDefault(hash, new LinkedHashSet<>())));
             result.add(item);
@@ -321,7 +324,7 @@ public final class CompactReportAssembler {
         return result;
     }
 
-    private JsonArray findings(JsonObject analysis, Map<String, List<String>> nodeIdsByGroup, EvidencePack evidence) {
+    private JsonArray findings(JsonObject analysis, Map<String, List<String>> nodeIdsByGroup, EvidencePack evidence, boolean english) {
         Set<String> allowedPaths = new LinkedHashSet<>(evidence.targetManifest());
         JsonArray result = new JsonArray();
         List<JsonObject> findings = objects(array(analysis, "findings"));
@@ -330,7 +333,7 @@ public final class CompactReportAssembler {
             JsonObject finding = new JsonObject();
             finding.addProperty("id", "finding-" + (index + 1));
             finding.addProperty("severity", normalizeSeverity(string(source, "severity")));
-            finding.addProperty("title", fallback(string(source, "title"), "审核发现"));
+            finding.addProperty("title", fallback(string(source, "title"), english ? "Review finding" : "审核发现"));
             finding.addProperty("meaning", fallback(string(source, "meaning"), string(source, "title")));
             LinkedHashSet<String> affected = new LinkedHashSet<>();
             for (String group : strings(array(source, "group_ids"))) affected.addAll(nodeIdsByGroup.getOrDefault(group, List.of()));
@@ -375,13 +378,13 @@ public final class CompactReportAssembler {
         return value != null && Set.of("critical", "high", "medium", "low", "info").contains(value) ? value : "info";
     }
 
-    private String moduleFromPath(String path) {
-        if (path == null || path.isBlank()) return "变更实现";
+    private String moduleFromPath(String path, boolean english) {
+        if (path == null || path.isBlank()) return english ? "Changed implementation" : "变更实现";
         String normalized = path.replace('\\', '/');
         String[] parts = normalized.split("/");
         if (parts.length >= 3) return parts[parts.length - 3] + "/" + parts[parts.length - 2];
         if (parts.length >= 2) return parts[parts.length - 2];
-        return "变更实现";
+        return english ? "Changed implementation" : "变更实现";
     }
 
     private String fallback(String value, String fallback) {
@@ -435,15 +438,18 @@ public final class CompactReportAssembler {
     private static final class Lane {
         private final String id;
         private final String name;
-        private String role = "承载本次改动相关的业务职责";
+        private String role;
+        private final boolean english;
         private final LinkedHashSet<String> responsibilities = new LinkedHashSet<>();
         private final LinkedHashSet<String> receives = new LinkedHashSet<>();
         private final LinkedHashSet<String> produces = new LinkedHashSet<>();
         private final LinkedHashSet<String> nodeIds = new LinkedHashSet<>();
 
-        private Lane(String id, String name) {
+        private Lane(String id, String name, boolean english) {
             this.id = id;
             this.name = name;
+            this.english = english;
+            this.role = english ? "Owns the business responsibility related to this change" : "承载本次改动相关的业务职责";
         }
 
         private void addNode(String nodeId, String responsibility, String moduleRole, List<String> inputs, List<String> outputs) {
@@ -461,7 +467,9 @@ public final class CompactReportAssembler {
             lane.addProperty("code_label", name);
             lane.addProperty("represents", role);
             lane.add("responsibilities", jsonStrings(responsibilities));
-            lane.addProperty("why_here", "这些源码节点直接承担本次聚合变更中的该项职责。");
+            lane.addProperty("why_here", english
+                    ? "These source nodes directly own this responsibility in the combined change."
+                    : "这些源码节点直接承担本次聚合变更中的该项职责。");
             lane.add("receives", jsonStrings(receives));
             lane.add("produces", jsonStrings(produces));
             lane.add("not_responsible", new JsonArray());

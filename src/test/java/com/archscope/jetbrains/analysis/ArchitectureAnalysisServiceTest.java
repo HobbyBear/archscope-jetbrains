@@ -16,10 +16,12 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class ArchitectureAnalysisServiceTest {
@@ -39,13 +41,76 @@ final class ArchitectureAnalysisServiceTest {
                 {"unknowns":[],"flow_map":{"id":"root","children":[{"id":"flow-1","children":[]}]}}
                 """).getAsJsonObject();
         assertTrue(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
-                closed, "只修正数据来源顺序并补充对象生命周期"
+                closed, intent(DomainEvidencePlan.Operation.UPDATE_EXPLANATION)
         ));
         assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
-                closed, "新增一条后台任务流程"
+                closed, intent(DomainEvidencePlan.Operation.ADD_NODES)
+        ));
+        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
+                closed, intent(DomainEvidencePlan.Operation.ADD_NODES)
+        ));
+        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
+                closed, intent(DomainEvidencePlan.Operation.MERGE_FLOWS)
         ));
         closed.getAsJsonArray("unknowns").add("入口未知");
-        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(closed, "补充入口"));
+        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
+                closed, intent(DomainEvidencePlan.Operation.UPDATE_EXPLANATION)));
+    }
+
+    @Test
+    void routesEditsFromTheModelIntentInsteadOfTheUsersLanguage() {
+        assertTrue(intent(DomainEvidencePlan.Operation.MERGE_DOMAINS).structural());
+        assertTrue(intent(DomainEvidencePlan.Operation.MOVE_NODES).structural());
+        assertTrue(intent(DomainEvidencePlan.Operation.REORDER_NODES).structural());
+        assertFalse(intent(DomainEvidencePlan.Operation.SUPPLEMENT_DOMAIN).structural());
+        assertFalse(intent(DomainEvidencePlan.Operation.CORRECT_FLOW).structural());
+        assertTrue(intent(DomainEvidencePlan.Operation.ADD_NODES).evidenceRequired());
+    }
+
+    @Test
+    void rejectsAReportedSuccessWhenTheRequestedGraphEditWasNotApplied() {
+        String current = """
+                {"business_domains":[{"id":"review"},{"id":"publish"}],
+                 "flow_map":{"id":"root","children":[
+                   {"id":"flow-1","children":[{"id":"step-1"}]},
+                   {"id":"flow-2","children":[{"id":"step-2"}]}]},
+                 "revision_history":[]}
+                """;
+        JsonObject unchangedWithClaim = JsonParser.parseString(current).getAsJsonObject();
+        unchangedWithClaim.getAsJsonArray("revision_history").add(JsonParser.parseString(
+                "{\"instruction\":\"合并流程\",\"summary\":\"已完成\"}"));
+
+        ModelClientException unchanged = assertThrows(ModelClientException.class,
+                () -> ArchitectureAnalysisService.verifyBusinessDomainEditApplied(
+                        current, unchangedWithClaim, intent(DomainEvidencePlan.Operation.MERGE_FLOWS)));
+        assertTrue(unchanged.getMessage().contains("没有发生变化"));
+
+        JsonObject proseOnly = JsonParser.parseString(current).getAsJsonObject();
+        proseOnly.addProperty("summary", "已经添加通知节点");
+        ModelClientException missingNode = assertThrows(ModelClientException.class,
+                () -> ArchitectureAnalysisService.verifyBusinessDomainEditApplied(
+                        current, proseOnly, intent(DomainEvidencePlan.Operation.ADD_NODES)));
+        assertTrue(missingNode.getMessage().contains("节点数量没有增加"));
+    }
+
+    @Test
+    void acceptsAppliedFlowchartNodeAndMergeEdits() throws Exception {
+        String current = """
+                {"business_domains":[{"id":"review"}],
+                 "flow_map":{"id":"root","children":[
+                   {"id":"flow-1","children":[{"id":"step-1"}]},
+                   {"id":"flow-2","children":[{"id":"step-2"}]}]}}
+                """;
+        JsonObject nodeAdded = JsonParser.parseString(current).getAsJsonObject();
+        nodeAdded.getAsJsonObject("flow_map").getAsJsonArray("children").get(0).getAsJsonObject()
+                .getAsJsonArray("children").add(JsonParser.parseString("{\"id\":\"step-new\"}"));
+        ArchitectureAnalysisService.verifyBusinessDomainEditApplied(
+                current, nodeAdded, intent(DomainEvidencePlan.Operation.ADD_NODES));
+
+        JsonObject flowsMerged = JsonParser.parseString(current).getAsJsonObject();
+        flowsMerged.getAsJsonObject("flow_map").getAsJsonArray("children").remove(1);
+        ArchitectureAnalysisService.verifyBusinessDomainEditApplied(
+                current, flowsMerged, intent(DomainEvidencePlan.Operation.MERGE_FLOWS));
     }
 
     @Test
@@ -96,6 +161,44 @@ final class ArchitectureAnalysisServiceTest {
         assertEquals(0, json.getAsJsonArray("unknowns").size());
         assertEquals(2, json.getAsJsonObject("analysis_diagnostics").get("evidence_rounds").getAsInt());
         assertEquals("confirmed", json.getAsJsonObject("analysis_diagnostics").get("stop_reason").getAsString());
+        assertEquals("queue-model", json.getAsJsonObject("analysis_diagnostics")
+                .get("model_provider_id").getAsString());
+    }
+
+    @Test
+    void fallsBackFromATruncatedInitialBusinessResponseWithoutARepairTurn() throws Exception {
+        git("init");
+        git("config", "user.email", "test@example.com");
+        git("config", "user.name", "Test");
+        Path source = repository.resolve("src/CreatorFlow.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                final class CreatorFlow {
+                    void createCreator() {}
+                    void reviewCreator() {}
+                    void publishCreator() {}
+                    void notifyCreator() {}
+                }
+                """);
+        git("add", "src/CreatorFlow.java");
+        git("commit", "-m", "creator flow");
+
+        AnalysisRequest request = AnalysisRequest.businessDomain(repository, "分析创作者流程");
+        EvidencePack evidence = new GitEvidenceService().collectSnapshot(request, indicator());
+        QueueModelClient client = new QueueModelClient(List.of(
+                plan("createCreator"),
+                "{\"schema\":\"closed-business-domain-analysis/v1\",\"flows\":["
+        ));
+        System.setProperty("archscope.cacheDir", repository.resolve("repair-cache").toString());
+        try {
+            AnalysisResult result = new ArchitectureAnalysisService(client).analyze(request, evidence, indicator());
+
+            assertEquals(2, client.calls);
+            assertEquals("分析创作者流程", JsonParser.parseString(result.reportJson()).getAsJsonObject()
+                    .get("title").getAsString());
+        } finally {
+            System.clearProperty("archscope.cacheDir");
+        }
     }
 
     @Test
@@ -254,6 +357,13 @@ final class ArchitectureAnalysisServiceTest {
                  "candidate_paths":["src/CreatorFlow.java"],
                  "queries":[{"literal":"%s","role":"state","reason":"定位流程状态"}]}
                 """.formatted(literal);
+    }
+
+    private static DomainEvidencePlan.EditIntent intent(DomainEvidencePlan.Operation operation) {
+        return new DomainEvidencePlan.EditIntent(
+                Set.of(operation), List.of(), List.of(), List.of(), List.of(),
+                operation.normallyRequiresEvidence()
+        );
     }
 
     private String report(String unknowns) {

@@ -16,11 +16,48 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class PromptBuilderTest {
     @Test
+    void businessDomainSynthesisRequestsTextSlotsInsteadOfReportJson() throws Exception {
+        AnalysisRequest request = AnalysisRequest.businessDomain(Path.of("/repo"), "分析聊天逻辑");
+        EvidencePack evidence = new EvidencePack(
+                Path.of("/repo"), "head", "head", "head", "tree", "fingerprint",
+                List.of(), "", List.of(), List.of("src/chat.go")
+        );
+        DomainEvidencePlan plan = DomainEvidencePlan.parse("""
+                {"schema":"business-domain-evidence-plan/v1","candidate_paths":["src/chat.go"],"queries":[]}
+                """, evidence);
+        String sourceEvidence = """
+                {"schema":"business-domain-source-evidence/v1","query_results":[],
+                 "candidate_excerpts":[{"path":"src/chat.go","excerpt":"1: package chat"}],
+                 "control_flow_excerpts":[]}
+                """;
+
+        PromptBuilder builder = new PromptBuilder();
+        String system = builder.businessDomainTextSystemPrompt(request);
+        String prompt = builder.businessDomainTextPrompt(
+                request, evidence, plan, sourceEvidence, List.of("REPORT_TITLE", "STEP_1_SUMMARY"),
+                new DomainTextReportAssembler().textContract(sourceEvidence, plan, evidence).bindings()
+        );
+
+        assertTrue(system.contains("not JSON"));
+        assertTrue(system.contains("SLOT_NAME<TAB>text"));
+        assertTrue(prompt.contains("REPORT_TITLE"));
+        assertTrue(prompt.contains("No JSON"));
+        assertTrue(system.contains("STEP_n_DOMAIN_ID"));
+        assertTrue(system.contains("STEP_n_FLOW_KEY"));
+        assertTrue(prompt.contains("text_slot_source_bindings"));
+        assertTrue(prompt.contains("src/chat.go"));
+    }
+    @Test
     void omitsLocalRepositoryPathAndFullManifestFromModelPayload() {
         CommitInfo commit = new CommitInfo("abc", List.of(), "A", "2026-08-13T10:00:00+08:00", "Subject");
         EvidencePack evidence = new EvidencePack(
                 Path.of("/absolute/private-root"), "head", "abc", "tree", "fingerprint",
-                List.of(new EvidencePack.CommitEvidence(commit, "base", "M\tsrc/App.go", List.of("src/App.go"))),
+                List.of(new EvidencePack.CommitEvidence(
+                        commit,
+                        "base",
+                        "M\tsrc/App.go\nA\tdocs/design.md\nA\topenspec/change/walkthrough.html\nM\tgo.sum",
+                        List.of("src/App.go", "docs/design.md", "openspec/change/walkthrough.html", "go.sum")
+                )),
                 List.of("src/App.go", "secret/local-only.txt")
         );
         AnalysisRequest request = new AnalysisRequest(Path.of("/absolute/private-root"), List.of(commit), "abc", "focus");
@@ -31,7 +68,15 @@ final class PromptBuilderTest {
         assertFalse(modelEvidence.has("targetManifest"));
         assertTrue(modelEvidence.get("target_manifest_file_count").getAsInt() == 2);
         assertFalse(modelEvidence.has("target_snapshots"));
+        assertTrue(modelEvidence.get("aggregate_name_status").getAsString().equals("M\tsrc/App.go"));
+        assertTrue(modelEvidence.getAsJsonArray("commits").get(0).getAsJsonObject()
+                .getAsJsonArray("changed_paths").size() == 1);
+        assertFalse(prompt.toString().contains("docs/design.md"));
+        assertFalse(prompt.toString().contains("walkthrough.html"));
+        assertFalse(prompt.toString().contains("go.sum"));
         assertFalse(prompt.toString().contains("/absolute/private-root"));
+        assertTrue(prompt.get("evidence_scope").getAsString().contains("only executable source"));
+        assertTrue(prompt.get("evidence_scope").getAsString().contains("excluded locally"));
         assertTrue(prompt.get("workspace_instruction").getAsString().contains("closed evidence bundle"));
         assertTrue(prompt.get("workspace_instruction").getAsString().contains("does not permit autonomous repository exploration"));
         assertTrue(prompt.get("workspace_instruction").getAsString().contains("Stop once every changed behavior"));
@@ -57,14 +102,32 @@ final class PromptBuilderTest {
         assertTrue(builder.businessDomainPlanningSystemPrompt().contains("complete enclosing function bodies"));
         assertTrue(builder.businessDomainPlanningSystemPrompt().contains("producer-to-"));
         assertTrue(builder.businessDomainPlanningSystemPrompt().contains("actual route/job registration"));
+        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("OPERATIONS<TAB>"));
+        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("not JSON"));
+        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("supplement_domain"));
+        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("add_nodes"));
         assertTrue(builder.businessDomainSystemPrompt().contains("later independent reader"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("graph-edit command"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("add, remove, move, or reorder nodes"));
         assertTrue(builder.businessDomainSystemPrompt().contains("primary_origin_id"));
         assertTrue(builder.businessDomainSystemPrompt().contains("field_groups"));
         assertTrue(builder.businessDomainSystemPrompt().contains("original analysis focus remains the report scope"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("Never promote a getter, finder, loader, router lookup"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("legitimate atomic actor goal may have one"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("Never invent, duplicate, or mechanically"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("return [] when the bounded evidence proves no specific exclusion"));
         assertTrue(builder.businessDomainResolutionSystemPrompt().contains("business-domain-evidence-resolution/v1"));
         assertTrue(builder.businessDomainPatchSystemPrompt().contains("business-domain-refinement-patch/v1"));
         assertTrue(builder.businessDomainPatchSystemPrompt().contains("requires_structural_rebuild"));
         assertTrue(builder.refinementSystemPrompt().contains("follow_up_instruction"));
+
+        DomainEvidencePlan emptyPlan = DomainEvidencePlan.parse(
+                "{\"schema\":\"business-domain-evidence-plan/v1\",\"candidate_paths\":[],\"queries\":[]}", evidence);
+        String refinement = builder.businessDomainRefinementPrompt(
+                request, evidence, "{}", "新增一个通知节点", emptyPlan,
+                "{\"candidate_excerpts\":[],\"query_results\":[]}");
+        assertTrue(refinement.contains("acceptance_rule"));
+        assertTrue(refinement.contains("explicit graph edit"));
     }
 
     @Test
@@ -120,5 +183,40 @@ final class PromptBuilderTest {
         String system = builder.businessDomainSystemPrompt(request);
         assertTrue(system.contains("先展示数据流"));
         assertTrue(system.contains("override the required JSON schema"));
+
+        DomainEvidencePlan plan = DomainEvidencePlan.parse("""
+                {"schema":"business-domain-evidence-plan/v1","candidate_paths":["src/creator.go"],
+                 "queries":[{"literal":"CreatorLevel","role":"state","reason":"定位等级"}]}
+                """, evidence);
+        String sourceEvidence = "{\"candidate_excerpts\":[],\"query_results\":[]}";
+        assertTrue(builder.businessDomainFinalPrompt(request, evidence, plan, sourceEvidence)
+                .contains("必须追到首次落库和最终消费者"));
+        assertTrue(builder.businessDomainRepairPrompt(
+                request, evidence, plan, sourceEvidence, "broken", "invalid")
+                .contains("必须追到首次落库和最终消费者"));
+        assertTrue(builder.businessDomainRefinementPrompt(
+                request, evidence, "{}", "补充等级变更", plan, sourceEvidence)
+                .contains("必须追到首次落库和最终消费者"));
+    }
+
+    @Test
+    void appliesEnglishOutputToEveryPromptLayer() throws Exception {
+        EvidencePack evidence = new EvidencePack(
+                Path.of("/repo"), "abc", "abc", "abc", "tree", "fingerprint",
+                List.of(), "", List.of(), List.of("src/chat.go")
+        );
+        AnalysisRequest request = AnalysisRequest.businessDomain(
+                Path.of("/repo"), "Analyze chat logic", AnalysisGuidance.EMPTY,
+                AnalysisRequest.OutputLanguage.ENGLISH
+        );
+        PromptBuilder builder = new PromptBuilder();
+
+        JsonObject payload = JsonParser.parseString(builder.businessDomainPrompt(request, evidence)).getAsJsonObject();
+        assertTrue(payload.get("output_language").getAsString().equals("en"));
+        assertTrue(payload.get("report_language").getAsString().contains("English only"));
+        String system = builder.businessDomainSystemPrompt(request);
+        assertTrue(system.contains("Write every human-readable JSON value in English"));
+        assertTrue(system.contains("Do not output Chinese characters"));
+        assertFalse(system.contains("Use concise Simplified Chinese"));
     }
 }

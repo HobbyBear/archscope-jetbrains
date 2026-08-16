@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.analysis;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.archscope.jetbrains.model.AnalysisRequest;
 import com.archscope.jetbrains.model.AnalysisResult;
 import com.archscope.jetbrains.model.EvidencePack;
@@ -37,6 +38,7 @@ public final class ArchitectureAnalysisService {
     private final DomainEvidenceExpansionService domainExpansionService = new DomainEvidenceExpansionService();
     private final CompactReportAssembler reportAssembler = new CompactReportAssembler();
     private final DomainReportAssembler domainReportAssembler = new DomainReportAssembler();
+    private final DomainTextReportAssembler domainTextReportAssembler = new DomainTextReportAssembler();
     private final DomainEvidenceResolutionAssembler domainResolutionAssembler = new DomainEvidenceResolutionAssembler();
     private final DomainReportPatchAssembler domainPatchAssembler = new DomainReportPatchAssembler();
     private final ReportValidator validator = new ReportValidator();
@@ -65,6 +67,7 @@ public final class ArchitectureAnalysisService {
             ProgressIndicator indicator,
             Consumer<String> statusListener
     ) throws Exception {
+        PluginLanguage.use(request.outputLanguage());
         if (request.isBusinessDomain()) {
             return analyzeBusinessDomain(request, evidence, indicator, statusListener);
         }
@@ -74,7 +77,7 @@ public final class ArchitectureAnalysisService {
         String analysisProfile = requestCacheProfile(modelClient.cacheIdentity(), request, "selected-changes-v3-elapsed");
         JsonObject cached = cache.load(evidence, analysisProfile);
         if (cached != null) {
-            publish(indicator, statusListener, "已复用相同提交范围的分析结果", 1.0);
+            publish(indicator, statusListener, t("已复用相同提交范围的分析结果", "Reused the analysis for the same commit range"), 1.0);
             String json = GSON.toJson(cached);
             return new AnalysisResult(json, renderer.render(cached, !JBColor.isBright()), evidence.fingerprint(), evidence.targetCommit());
         }
@@ -83,24 +86,24 @@ public final class ArchitectureAnalysisService {
             String response;
             String aggregateDiff = workspace.readEvidence("aggregate.diff");
             if (shouldUseDirectAnalysis(countPatchFiles(aggregateDiff), aggregateDiff.length())) {
-                publish(indicator, statusListener, "正在单轮分析独立业务流程", 0.35);
+                publish(indicator, statusListener, t("正在单轮分析独立业务流程", "Analyzing independent business flows in one pass"), 0.35);
                 response = modelClient.complete(
                         promptBuilder.closedAnalysisSystemPrompt(request),
                         promptBuilder.directAnalysisPrompt(request, evidence, workspace),
                         workspace.root(),
                         indicator,
-                        "分析独立业务流程",
+                        t("分析独立业务流程", "Analyze independent business flows"),
                         statusListener,
                         ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                 );
             } else {
-                publish(indicator, statusListener, "正在识别独立业务流程", 0.3);
+                publish(indicator, statusListener, t("正在识别独立业务流程", "Identifying independent business flows"), 0.3);
                 String planningResponse = modelClient.complete(
                         promptBuilder.planningSystemPrompt(request),
                         promptBuilder.planningPrompt(request, evidence, workspace),
                         workspace.root(),
                         indicator,
-                        "识别独立业务流程",
+                        t("识别独立业务流程", "Identify independent business flows"),
                         statusListener,
                         ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                 );
@@ -108,25 +111,27 @@ public final class ArchitectureAnalysisService {
                 LOG.info("Change plan completed: groups=" + plan.groups().size()
                         + ", queries=" + plan.groups().stream().mapToInt(group -> group.evidenceQueries().size()).sum());
 
-                publish(indicator, statusListener, "正在补全流程入口与结果证据", 0.52);
+                publish(indicator, statusListener, t("正在补全流程入口与结果证据", "Expanding evidence for flow entries and outcomes"), 0.52);
                 String expandedEvidence = expansionService.expand(plan, evidence, workspace, indicator);
-                publish(indicator, statusListener, "正在生成多流程报告", 0.65);
+                publish(indicator, statusListener, t("正在生成多流程报告", "Generating the multi-flow report"), 0.65);
                 response = modelClient.complete(
                         promptBuilder.closedAnalysisSystemPrompt(request),
                         promptBuilder.finalPrompt(request, evidence, workspace, plan, expandedEvidence),
                         workspace.root(),
                         indicator,
-                        "生成多流程报告",
+                        t("生成多流程报告", "Generate the multi-flow report"),
                         statusListener,
                         ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                 );
             }
-            publish(indicator, statusListener, "正在校验源码证据和流程引用", 0.9);
+            publish(indicator, statusListener, t("正在校验源码证据和流程引用", "Validating source evidence and flow references"), 0.9);
             JsonObject assembled = reportAssembler.assemble(response, request, evidence);
             JsonObject report = validator.validate(GSON.toJson(assembled), evidence, workspace.root());
+            ReportLanguageValidator.validate(report, request.outputLanguage());
             addAnalysisDiagnostics(report, startedAt, "completed");
+            addExecutionProvenance(report, request);
             String json = GSON.toJson(report);
-            publish(indicator, statusListener, "正在生成 IDE 内交互报告", 0.97);
+            publish(indicator, statusListener, t("正在生成 IDE 内交互报告", "Generating the interactive IDE report"), 0.97);
             String html = renderer.render(report, !JBColor.isBright());
             cache.store(evidence, analysisProfile, report);
             indicator.setFraction(1.0);
@@ -143,18 +148,21 @@ public final class ArchitectureAnalysisService {
             ProgressIndicator indicator,
             Consumer<String> statusListener
     ) throws Exception {
+        PluginLanguage.use(request.outputLanguage());
         String normalizedInstruction = instruction == null ? "" : instruction.strip();
-        if (normalizedInstruction.isEmpty()) throw new ModelClientException("请输入需要展开、补充或修改的内容");
+        if (normalizedInstruction.isEmpty()) throw new ModelClientException(t(
+                "请输入需要展开、补充或修改的内容", "Enter what should be expanded, added, or corrected"));
         long startedAt = System.nanoTime();
         Map<String, Long> phaseTimings = new LinkedHashMap<>();
-        publish(indicator, statusListener, "正在理解补充要求", 0.12);
+        publish(indicator, statusListener, t("正在理解补充要求", "Understanding the follow-up request"), 0.12);
         String response;
         JsonObject report;
+        DomainEvidencePlan.EditIntent editIntent = null;
         if (request.isBusinessDomain()) {
             try (CodexWorkspaceService.Workspace workspace = workspaceService.createSnapshot(evidence, indicator)) {
                 workspace.materialize(reportSourcePaths(currentReportJson, evidence), indicator);
-                publish(indicator, statusListener, "正在识别补充内容所需证据", 0.2);
                 long phaseStartedAt = System.nanoTime();
+                publish(indicator, statusListener, t("正在识别报告编辑意图", "Understanding the report edit"), 0.2);
                 String planningResponse = modelClient.complete(
                         promptBuilder.businessDomainPlanningSystemPrompt(request),
                         promptBuilder.businessDomainPlanningPrompt(
@@ -162,22 +170,29 @@ public final class ArchitectureAnalysisService {
                         ),
                         workspace.root(),
                         indicator,
-                        "识别补充证据范围",
+                        t("识别编辑目标与证据范围", "Identify edit targets and evidence scope"),
                         statusListener,
                         ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                 );
                 phaseTimings.put("planning_model", elapsedMs(phaseStartedAt));
-                DomainEvidencePlan plan = DomainEvidencePlan.parse(planningResponse, evidence)
-                        .withUnresolvedQueries(currentReportJson);
-                publish(indicator, statusListener, "正在读取补充流程证据", 0.42);
-                phaseStartedAt = System.nanoTime();
-                String sourceEvidence = domainExpansionService.expand(plan, evidence, workspace, indicator);
-                phaseTimings.put("source_expansion", elapsedMs(phaseStartedAt));
+                DomainEvidencePlan plan = DomainEvidencePlan.parse(planningResponse, evidence);
+                editIntent = plan.editIntent();
+                String sourceEvidence;
+                if (!editIntent.evidenceRequired()) {
+                    sourceEvidence = emptyDomainSourceEvidence();
+                    phaseTimings.put("model_edit_routing", 0L);
+                } else {
+                    plan = plan.withUnresolvedQueries(currentReportJson);
+                    publish(indicator, statusListener, t("正在读取补充流程证据", "Reading additional flow evidence"), 0.42);
+                    phaseStartedAt = System.nanoTime();
+                    sourceEvidence = domainExpansionService.expand(plan, evidence, workspace, indicator);
+                    phaseTimings.put("source_expansion", elapsedMs(phaseStartedAt));
+                }
                 JsonObject currentReport = JsonParser.parseString(currentReportJson).getAsJsonObject();
                 report = null;
-                if (shouldUseIncrementalDomainPatch(currentReport, normalizedInstruction)) {
+                if (shouldUseIncrementalDomainPatch(currentReport, editIntent)) {
                     try {
-                        publish(indicator, statusListener, "正在增量更新已确认的业务报告", 0.68);
+                        publish(indicator, statusListener, t("正在增量更新已确认的业务报告", "Updating the verified business report"), 0.68);
                         phaseStartedAt = System.nanoTime();
                         String patchResponse = modelClient.complete(
                                 promptBuilder.businessDomainPatchSystemPrompt(request),
@@ -186,7 +201,7 @@ public final class ArchitectureAnalysisService {
                                 ),
                                 workspace.root(),
                                 indicator,
-                                "增量更新业务报告",
+                                t("增量更新业务报告", "Update the business report"),
                                 statusListener,
                                 ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                         );
@@ -195,7 +210,7 @@ public final class ArchitectureAnalysisService {
                                 patchResponse, currentReport, evidence
                         );
                         if (!patch.requiresStructuralRebuild()) {
-                            publish(indicator, statusListener, "正在校验增量补丁与源码引用", 0.9);
+                            publish(indicator, statusListener, t("正在校验增量补丁与源码引用", "Validating the report update and source references"), 0.9);
                             phaseStartedAt = System.nanoTime();
                             report = validator.validate(GSON.toJson(patch.report()), evidence, workspace.root());
                             phaseTimings.put("validation", elapsedMs(phaseStartedAt));
@@ -215,15 +230,15 @@ public final class ArchitectureAnalysisService {
                             ),
                             workspace.root(),
                             indicator,
-                            "补充业务报告",
+                            t("补充业务报告", "Expand the business report"),
                             statusListener,
                             ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                     );
                     phaseTimings.put("full_refinement_model", elapsedMs(phaseStartedAt));
-                    publish(indicator, statusListener, "正在校验补充后的源码证据", 0.9);
+                    publish(indicator, statusListener, t("正在校验补充后的源码证据", "Validating the expanded source evidence"), 0.9);
                     phaseStartedAt = System.nanoTime();
                     report = assembleAndValidateBusinessReport(
-                            response, request, evidence, workspace, indicator, statusListener
+                            response, request, evidence, plan, sourceEvidence, workspace, indicator, statusListener
                     );
                     phaseTimings.put("assembly_validation", elapsedMs(phaseStartedAt));
                     phaseStartedAt = System.nanoTime();
@@ -243,17 +258,22 @@ public final class ArchitectureAnalysisService {
                         promptBuilder.refinementPrompt(request, evidence, currentReportJson, normalizedInstruction),
                         workspace.root(),
                         indicator,
-                        "补充改动报告",
+                        t("补充改动报告", "Expand the change report"),
                         statusListener,
                         ModelClient.WorkspaceAccess.READ_ONLY_REPOSITORY
                 );
-                publish(indicator, statusListener, "正在校验补充后的源码证据", 0.9);
+                publish(indicator, statusListener, t("正在校验补充后的源码证据", "Validating the expanded source evidence"), 0.9);
                 report = validator.validate(response, evidence, workspace.root());
             }
         }
-        appendRevision(report, normalizedInstruction);
+        if (request.isBusinessDomain()) {
+            verifyBusinessDomainEditApplied(currentReportJson, report, editIntent);
+        }
+        appendRevision(report, normalizedInstruction, request.outputLanguage());
         if (!request.isBusinessDomain()) addAnalysisDiagnostics(report, startedAt, "refined");
-        publish(indicator, statusListener, "正在更新交互报告", 0.97);
+        addExecutionProvenance(report, request);
+        ReportLanguageValidator.validate(report, request.outputLanguage());
+        publish(indicator, statusListener, t("正在更新交互报告", "Updating the interactive report"), 0.97);
         long renderStartedAt = System.nanoTime();
         String html = renderer.render(report, !JBColor.isBright());
         phaseTimings.put("render", elapsedMs(renderStartedAt));
@@ -272,16 +292,17 @@ public final class ArchitectureAnalysisService {
         indicator.setIndeterminate(false);
         long startedAt = System.nanoTime();
         Map<String, Long> phaseTimings = new LinkedHashMap<>();
-        String analysisProfile = requestCacheProfile(modelClient.cacheIdentity(), request, "business-domain-v16-fast-stable");
+        String analysisProfile = requestCacheProfile(modelClient.cacheIdentity(), request, "business-domain-v25-psi-source-anchors");
         JsonObject cached = cache.load(evidence, analysisProfile);
         if (cached != null) {
-            publish(indicator, statusListener, "已复用相同主题和工作区的业务报告", 1.0);
+            publish(indicator, statusListener, t("已复用相同主题和工作区的业务报告", "Reused the business report for the same topic and workspace"), 1.0);
             JsonObject report = cached.deepCopy();
             JsonObject diagnostics = report.has("analysis_diagnostics") && report.get("analysis_diagnostics").isJsonObject()
                     ? report.getAsJsonObject("analysis_diagnostics") : new JsonObject();
             if (diagnostics.has("elapsed_ms")) diagnostics.add("source_analysis_elapsed_ms", diagnostics.get("elapsed_ms").deepCopy());
             diagnostics.addProperty("operation", "cache_hit");
             report.add("analysis_diagnostics", diagnostics);
+            addExecutionProvenance(report, request);
             phaseTimings.put("cache_lookup", elapsedMs(startedAt));
             finishDiagnostics(report, startedAt, phaseTimings);
             long renderStartedAt = System.nanoTime();
@@ -291,41 +312,45 @@ public final class ArchitectureAnalysisService {
             return new AnalysisResult(GSON.toJson(report), html, evidence.fingerprint(), evidence.targetCommit());
         }
         try (CodexWorkspaceService.Workspace workspace = workspaceService.createSnapshot(evidence, indicator)) {
-            publish(indicator, statusListener, "正在识别业务边界和关键入口", 0.18);
+            publish(indicator, statusListener, t("正在识别业务边界和关键入口", "Identifying business boundaries and key entry points"), 0.18);
             long phaseStartedAt = System.nanoTime();
             String planningResponse = modelClient.complete(
                     promptBuilder.businessDomainPlanningSystemPrompt(request),
                     promptBuilder.businessDomainPlanningPrompt(request, evidence, "", ""),
                     workspace.root(),
                     indicator,
-                    "识别业务分析范围",
+                    t("识别业务分析范围", "Identify the business analysis scope"),
                     statusListener,
                     ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
             );
             phaseTimings.put("planning_model", elapsedMs(phaseStartedAt));
             DomainEvidencePlan plan = DomainEvidencePlan.parse(planningResponse, evidence);
-            publish(indicator, statusListener, "正在读取入口、规则、状态和结果证据", 0.4);
+            publish(indicator, statusListener, t("正在读取入口、规则、状态和结果证据", "Reading evidence for entries, rules, states, and outcomes"), 0.4);
             phaseStartedAt = System.nanoTime();
             String sourceEvidence = domainExpansionService.expand(plan, evidence, workspace, indicator);
             phaseTimings.put("source_expansion", elapsedMs(phaseStartedAt));
             LOG.info("Business source evidence expanded: payloadChars=" + sourceEvidence.length());
-            publish(indicator, statusListener, "正在生成业务域与完整流程", 0.62);
+            publish(indicator, statusListener, t("正在生成业务域与完整流程", "Generating business domains and complete flows"), 0.62);
             phaseStartedAt = System.nanoTime();
+            DomainTextReportAssembler.TextContract textContract =
+                    domainTextReportAssembler.textContract(sourceEvidence, plan, evidence);
             String response = modelClient.complete(
-                    promptBuilder.businessDomainSystemPrompt(request),
-                    promptBuilder.businessDomainFinalPrompt(request, evidence, plan, sourceEvidence),
+                    promptBuilder.businessDomainTextSystemPrompt(request),
+                    promptBuilder.businessDomainTextPrompt(
+                            request, evidence, plan, sourceEvidence, textContract.slots(), textContract.bindings()
+                    ),
                     workspace.root(),
                     indicator,
-                    "生成业务理解报告",
+                    t("生成业务理解报告", "Generate the business logic report"),
                     statusListener,
                     ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
             );
             phaseTimings.put("synthesis_model", elapsedMs(phaseStartedAt));
-            publish(indicator, statusListener, "正在校验业务流程和源码引用", 0.72);
+            publish(indicator, statusListener, t("正在校验业务流程和源码引用", "Validating business flows and source references"), 0.72);
             phaseStartedAt = System.nanoTime();
-            JsonObject report = assembleAndValidateBusinessReport(
-                    response, request, evidence, workspace, indicator, statusListener
-            );
+            JsonObject assembled = domainTextReportAssembler.assemble(response, request, evidence, plan, sourceEvidence);
+            JsonObject report = validator.validate(GSON.toJson(assembled), evidence, workspace.root());
+            ReportLanguageValidator.validate(report, request.outputLanguage());
             phaseTimings.put("assembly_validation", elapsedMs(phaseStartedAt));
             phaseStartedAt = System.nanoTime();
             DomainConvergence convergence = convergeDomainEvidence(
@@ -335,7 +360,9 @@ public final class ArchitectureAnalysisService {
             report = convergence.report();
             addDomainDiagnostics(report, convergence.evidenceRounds(), startedAt,
                     convergence.stopReason(), "initial", phaseTimings);
-            publish(indicator, statusListener, "正在生成业务理解报告", 0.97);
+            addExecutionProvenance(report, request);
+            ReportLanguageValidator.validate(report, request.outputLanguage());
+            publish(indicator, statusListener, t("正在生成业务理解报告", "Generating the business logic report"), 0.97);
             long renderStartedAt = System.nanoTime();
             String html = renderer.render(report, !JBColor.isBright());
             phaseTimings.put("render", elapsedMs(renderStartedAt));
@@ -380,7 +407,8 @@ public final class ArchitectureAnalysisService {
             double planningFraction = Math.min(0.88, 0.72 + (nextRound - 1) * 0.07);
             try {
                 publish(indicator, statusListener,
-                        "正在补齐待确认项 · 第 " + nextRound + " 轮",
+                        t("正在补齐待确认项 · 第 " + nextRound + " 轮",
+                                "Resolving unknowns · round " + nextRound),
                         planningFraction);
                 DomainEvidencePlan followUpPlan;
                 if (pendingFrontier != null && !pendingFrontier.queries().isEmpty()) {
@@ -404,7 +432,7 @@ public final class ArchitectureAnalysisService {
                             ),
                             workspace.root(),
                             indicator,
-                            "定位待确认项的补充证据",
+                            t("定位待确认项的补充证据", "Locate evidence for unresolved questions"),
                             statusListener,
                             ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                     );
@@ -431,7 +459,8 @@ public final class ArchitectureAnalysisService {
                     stopReason = "no_new_evidence";
                     break;
                 }
-                publish(indicator, statusListener, "正在用补充证据收敛待确认项",
+                publish(indicator, statusListener, t("正在用补充证据收敛待确认项",
+                                "Resolving unknowns with additional evidence"),
                         Math.min(0.93, planningFraction + 0.04));
                 String resolutionResponse = modelClient.complete(
                         promptBuilder.businessDomainResolutionSystemPrompt(request),
@@ -440,7 +469,7 @@ public final class ArchitectureAnalysisService {
                         ),
                         workspace.root(),
                         indicator,
-                        "收敛待确认项",
+                        t("收敛待确认项", "Resolve unknowns"),
                         statusListener,
                         ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
                 );
@@ -475,7 +504,11 @@ public final class ArchitectureAnalysisService {
         return new DomainConvergence(report, evidenceRounds, stopReason);
     }
 
-    private void appendRevision(JsonObject report, String instruction) {
+    private void appendRevision(
+            JsonObject report,
+            String instruction,
+            AnalysisRequest.OutputLanguage outputLanguage
+    ) {
         JsonArray history = report.has("revision_history") && report.get("revision_history").isJsonArray()
                 ? report.getAsJsonArray("revision_history")
                 : new JsonArray();
@@ -489,8 +522,11 @@ public final class ArchitectureAnalysisService {
             }
         }
         JsonObject revision = new JsonObject();
-        revision.addProperty("instruction", instruction);
-        revision.addProperty("summary", "已根据补充要求更新报告");
+        revision.addProperty("instruction", outputLanguage.isEnglish() && ReportLanguageValidator.containsHan(instruction)
+                ? "Follow-up instruction applied" : instruction);
+        revision.addProperty("summary", outputLanguage.isEnglish()
+                ? "The report was updated from the follow-up instruction."
+                : "已根据补充要求更新报告");
         history.add(revision);
         report.add("revision_history", history);
     }
@@ -499,26 +535,152 @@ public final class ArchitectureAnalysisService {
         return changedPathCount <= 30 && aggregateDiffChars <= 90_000;
     }
 
-    static boolean shouldUseIncrementalDomainPatch(JsonObject report, String instruction) {
+    static boolean shouldUseIncrementalDomainPatch(JsonObject report, DomainEvidencePlan.EditIntent intent) {
         if (unknownCount(report) != 0 || !report.has("flow_map") || !report.get("flow_map").isJsonObject()) {
             return false;
         }
-        String normalized = instruction == null ? "" : instruction.strip().toLowerCase(java.util.Locale.ROOT);
-        if (normalized.isBlank()) return false;
-        boolean chineseStructural = java.util.List.of("新增", "增加", "删除", "移除", "合并", "拆分", "重排", "重做", "重构")
-                .stream().anyMatch(normalized::contains)
-                && java.util.List.of("流程", "步骤", "业务域", "整份报告", "整个报告")
-                .stream().anyMatch(normalized::contains);
-        if (chineseStructural) return false;
-        return java.util.List.of(
-                "重新生成报告", "完全重写", "整体重构",
-                "add flow", "new flow", "remove flow", "delete flow", "split flow", "merge flow", "new domain",
-                "structural rebuild", "rewrite the entire report"
-        ).stream().noneMatch(normalized::contains);
+        return intent != null && !intent.structural();
+    }
+
+    static void verifyBusinessDomainEditApplied(
+            String currentReportJson,
+            JsonObject candidate,
+            DomainEvidencePlan.EditIntent intent
+    ) throws ModelClientException {
+        JsonObject current = JsonParser.parseString(currentReportJson).getAsJsonObject();
+        JsonObject before = meaningfulReport(current);
+        JsonObject after = meaningfulReport(candidate);
+        if (before.equals(after)) {
+            throw unappliedEdit("报告主体没有发生变化");
+        }
+
+        int beforeDomains = arraySize(current, "business_domains", "domains");
+        int afterDomains = arraySize(candidate, "business_domains", "domains");
+        int beforeFlows = flowCount(current);
+        int afterFlows = flowCount(candidate);
+        int beforeNodes = flowNodeCount(current);
+        int afterNodes = flowNodeCount(candidate);
+
+        if (intent != null && intent.has(DomainEvidencePlan.Operation.ADD_DOMAIN) && afterDomains <= beforeDomains) {
+            throw unappliedEdit("要求新增业务域，但业务域数量没有增加");
+        }
+        if (intent != null && intent.has(DomainEvidencePlan.Operation.MERGE_DOMAINS) && afterDomains >= beforeDomains) {
+            throw unappliedEdit("要求合并业务域，但业务域数量没有减少");
+        }
+        if (intent != null && intent.has(DomainEvidencePlan.Operation.MERGE_FLOWS) && afterFlows >= beforeFlows) {
+            throw unappliedEdit("要求合并流程，但流程数量没有减少");
+        }
+        if (intent != null && intent.has(DomainEvidencePlan.Operation.SPLIT_FLOW) && afterFlows <= beforeFlows) {
+            throw unappliedEdit("要求拆分流程，但流程数量没有增加");
+        }
+        if (intent != null && intent.has(DomainEvidencePlan.Operation.ADD_NODES) && afterNodes <= beforeNodes) {
+            throw unappliedEdit("要求新增流程节点，但节点数量没有增加");
+        }
+        if (intent != null && intent.has(DomainEvidencePlan.Operation.REMOVE_NODES) && afterNodes >= beforeNodes) {
+            throw unappliedEdit("要求删除流程节点，但节点数量没有减少");
+        }
+        if (intent != null && (intent.has(DomainEvidencePlan.Operation.MOVE_NODES)
+                || intent.has(DomainEvidencePlan.Operation.REORDER_NODES))
+                && flowGraphIdentity(current).equals(flowGraphIdentity(candidate))) {
+            throw unappliedEdit("要求移动或重排节点，但流程图的父子关系和顺序没有变化");
+        }
+    }
+
+    private static ModelClientException unappliedEdit(String reason) {
+        return new ModelClientException("报告修改未生效：" + reason + "。原报告已保留，请缩小目标后重试。");
+    }
+
+    private static JsonObject meaningfulReport(JsonObject report) {
+        JsonObject copy = report.deepCopy();
+        for (String field : java.util.List.of(
+                "revision_history", "analysis_diagnostics", "execution_provenance", "generated_at", "updated_at"
+        )) {
+            copy.remove(field);
+        }
+        return copy;
+    }
+
+    private static int arraySize(JsonObject report, String primary, String fallback) {
+        if (report.has(primary) && report.get(primary).isJsonArray()) return report.getAsJsonArray(primary).size();
+        return report.has(fallback) && report.get(fallback).isJsonArray() ? report.getAsJsonArray(fallback).size() : 0;
+    }
+
+    private static int flowCount(JsonObject report) {
+        if (report.has("flow_map") && report.get("flow_map").isJsonObject()) {
+            JsonObject root = report.getAsJsonObject("flow_map");
+            return root.has("children") && root.get("children").isJsonArray()
+                    ? root.getAsJsonArray("children").size() : 0;
+        }
+        return report.has("flows") && report.get("flows").isJsonArray() ? report.getAsJsonArray("flows").size() : 0;
+    }
+
+    private static int flowNodeCount(JsonObject report) {
+        if (report.has("flow_map") && report.get("flow_map").isJsonObject()) {
+            return descendantCount(report.getAsJsonObject("flow_map"));
+        }
+        if (!report.has("flows") || !report.get("flows").isJsonArray()) return 0;
+        int count = 0;
+        for (JsonElement flow : report.getAsJsonArray("flows")) {
+            if (flow.isJsonObject()) count += childArraySize(flow.getAsJsonObject(), "steps");
+        }
+        return count;
+    }
+
+    private static int descendantCount(JsonObject parent) {
+        if (!parent.has("children") || !parent.get("children").isJsonArray()) return 0;
+        int count = 0;
+        for (JsonElement child : parent.getAsJsonArray("children")) {
+            if (!child.isJsonObject()) continue;
+            count++;
+            count += descendantCount(child.getAsJsonObject());
+        }
+        return count;
+    }
+
+    private static int childArraySize(JsonObject object, String field) {
+        return object.has(field) && object.get(field).isJsonArray() ? object.getAsJsonArray(field).size() : 0;
+    }
+
+    private static String flowGraphIdentity(JsonObject report) {
+        StringBuilder identity = new StringBuilder();
+        if (report.has("flow_map") && report.get("flow_map").isJsonObject()) {
+            appendGraphIdentity(report.getAsJsonObject("flow_map"), identity);
+        } else if (report.has("flows") && report.get("flows").isJsonArray()) {
+            for (JsonElement flow : report.getAsJsonArray("flows")) {
+                if (flow.isJsonObject()) appendLegacyFlowIdentity(flow.getAsJsonObject(), identity);
+            }
+        }
+        return identity.toString();
+    }
+
+    private static void appendGraphIdentity(JsonObject node, StringBuilder identity) {
+        identity.append('(').append(firstString(node, "id")).append(':');
+        if (node.has("children") && node.get("children").isJsonArray()) {
+            for (JsonElement child : node.getAsJsonArray("children")) {
+                if (child.isJsonObject()) appendGraphIdentity(child.getAsJsonObject(), identity);
+            }
+        }
+        identity.append(')');
+    }
+
+    private static void appendLegacyFlowIdentity(JsonObject flow, StringBuilder identity) {
+        identity.append('(').append(firstString(flow, "id")).append(':');
+        if (flow.has("steps") && flow.get("steps").isJsonArray()) {
+            for (JsonElement step : flow.getAsJsonArray("steps")) {
+                if (step.isJsonObject()) identity.append(firstString(step.getAsJsonObject(), "id")).append(',');
+            }
+        }
+        identity.append(')');
+    }
+
+    private static String emptyDomainSourceEvidence() {
+        return "{\"schema\":\"business-domain-source-evidence/v1\",\"query_results\":[],"
+                + "\"candidate_excerpts\":[],\"control_flow_excerpts\":[]}";
     }
 
     static String requestCacheProfile(String modelIdentity, AnalysisRequest request, String version) {
         return modelIdentity + "/" + version
+                + "/lang-" + request.outputLanguage().code()
                 + "/f-" + shortHash(request.focus())
                 + "/g-" + request.guidance().fingerprint();
     }
@@ -634,12 +796,44 @@ public final class ArchitectureAnalysisService {
             String response,
             AnalysisRequest request,
             EvidencePack evidence,
+            DomainEvidencePlan plan,
+            String sourceEvidence,
             CodexWorkspaceService.Workspace workspace,
             ProgressIndicator indicator,
             Consumer<String> statusListener
     ) throws Exception {
-        JsonObject assembled = domainReportAssembler.assemble(response, request, evidence);
-        return validator.validate(GSON.toJson(assembled), evidence, workspace.root());
+        String candidate = response;
+        Exception lastFailure = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                JsonObject assembled = domainReportAssembler.assemble(candidate, request, evidence);
+                JsonObject validated = validator.validate(GSON.toJson(assembled), evidence, workspace.root());
+                ReportLanguageValidator.validate(validated, request.outputLanguage());
+                return validated;
+            } catch (ModelClientException | ReportValidationException exception) {
+                lastFailure = exception;
+                if (attempt == 2) throw exception;
+                int repairRound = attempt + 1;
+                LOG.info("Business report was rejected; requesting JSON repair round " + repairRound
+                        + ": " + exception.getMessage());
+                publish(indicator, statusListener,
+                        t("正在修复模型 JSON · 第 " + repairRound + " 轮",
+                                "Repairing model JSON · round " + repairRound),
+                        Math.min(0.9, 0.74 + repairRound * 0.05));
+                candidate = modelClient.complete(
+                        promptBuilder.businessDomainSystemPrompt(request),
+                        promptBuilder.businessDomainRepairPrompt(
+                                request, evidence, plan, sourceEvidence, candidate, exception.getMessage()),
+                        workspace.root(),
+                        indicator,
+                        t("修复业务报告 JSON（第 " + repairRound + " 轮）",
+                                "Repair business report JSON (round " + repairRound + ")"),
+                        statusListener,
+                        ModelClient.WorkspaceAccess.CLOSED_EVIDENCE
+                );
+            }
+        }
+        throw lastFailure;
     }
 
     private static String shortHash(String value) {
@@ -678,6 +872,28 @@ public final class ArchitectureAnalysisService {
         report.add("analysis_diagnostics", diagnostics);
     }
 
+    private void addExecutionProvenance(JsonObject report, AnalysisRequest request) {
+        JsonObject diagnostics = report.has("analysis_diagnostics") && report.get("analysis_diagnostics").isJsonObject()
+                ? report.getAsJsonObject("analysis_diagnostics") : new JsonObject();
+        diagnostics.addProperty("model_provider_id", modelClient.id());
+        diagnostics.addProperty("model_provider_name", request.outputLanguage().isEnglish()
+                ? englishProviderName(modelClient.id(), modelClient.displayName())
+                : modelClient.displayName());
+        diagnostics.addProperty("custom_instructions_applied", !request.guidance().customInstructions().isBlank());
+        diagnostics.addProperty("system_guidance_applied", !request.guidance().additionalSystemPrompt().isBlank());
+        diagnostics.addProperty("guidance_fingerprint", request.guidance().fingerprint());
+        diagnostics.addProperty("output_language", request.outputLanguage().code());
+        report.add("analysis_diagnostics", diagnostics);
+    }
+
+    private static String englishProviderName(String id, String displayName) {
+        return switch (id) {
+            case "codex-local" -> "Local Codex";
+            case "claude-local" -> "Claude CLI";
+            default -> ReportLanguageValidator.containsHan(displayName) ? id : displayName;
+        };
+    }
+
     private static void finishDiagnostics(JsonObject report, long startedAt, Map<String, Long> phaseTimings) {
         if (!report.has("analysis_diagnostics") || !report.get("analysis_diagnostics").isJsonObject()) return;
         JsonObject diagnostics = report.getAsJsonObject("analysis_diagnostics");
@@ -695,6 +911,10 @@ public final class ArchitectureAnalysisService {
         return (System.nanoTime() - startedAt) / 1_000_000L;
     }
 
+    private static String t(String chinese, String english) {
+        return PluginLanguage.text(chinese, english);
+    }
+
     private static int countPatchFiles(String patch) {
         return (int) patch.lines().filter(line -> line.startsWith("diff --git ")).count();
     }
@@ -708,6 +928,7 @@ public final class ArchitectureAnalysisService {
             String message,
             double fraction
     ) {
+        message = PluginLanguage.userMessage(message);
         indicator.setText(message);
         indicator.setFraction(fraction);
         statusListener.accept(message);

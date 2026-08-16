@@ -3,6 +3,7 @@ package com.archscope.jetbrains.analysis;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -43,5 +44,11 @@ final class LocalCliModelClientTest {
                 ModelClient.WorkspaceAccess.READ_ONLY_REPOSITORY
         );
         assertTrue(repositoryCommand.containsAll(List.of("--sandbox", "read-only")));
+    }
+
+    @Test
+    void removesIdeNativeLibraryPathFromCodexEnvironment() {
+        ProcessBuilder builder = client.processBuilder(client.command(), Path.of("."));
+        assertFalse(builder.environment().containsKey("LD_LIBRARY_PATH"));
     }
 }

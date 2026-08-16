@@ -38,8 +38,7 @@ public final class ReportValidator {
         List<String> errors = new ArrayList<>();
         JsonObject report;
         try {
-            String normalized = stripMarkdownFence(rawResponse.strip());
-            report = JsonParser.parseString(normalized).getAsJsonObject();
+            report = ModelJsonParser.parseObject(rawResponse);
         } catch (RuntimeException exception) {
             throw new ReportValidationException(List.of("模型没有返回合法的单个 JSON 对象：" + exception.getMessage()));
         }
@@ -115,14 +114,6 @@ public final class ReportValidator {
             JsonArray plainStory = requireArray(overview, "plain_story", errors);
             JsonArray businessObjects = requireArray(overview, "business_objects", errors);
             requireArray(overview, "domain_relationships", errors);
-            if (actors != null && actors.isEmpty()) errors.add("业务报告至少需要一个参与者");
-            if (terms != null && terms.isEmpty()) errors.add("业务报告至少需要一个面向新人的术语解释");
-            if (plainStory != null && (plainStory.size() < 3 || plainStory.size() > 7)) {
-                errors.add("business_overview.plain_story 需要 3-7 句有序白话说明");
-            }
-            if (businessObjects != null && businessObjects.isEmpty()) {
-                errors.add("业务报告至少需要解释一个核心业务对象");
-            }
             validateBusinessObjects(businessObjects, evidence, repositoryRoot, errors);
         }
 
@@ -139,12 +130,6 @@ public final class ReportValidator {
                         "depends_on", "flow_ids", "source_node_ids"
                 )) {
                     if (array(domain, field) == null) errors.add("business domain " + id + " 缺少数组 " + field);
-                }
-                for (String field : List.of("owns", "receives", "produces", "not_responsible")) {
-                    JsonArray values = array(domain, field);
-                    if (values != null && values.isEmpty()) {
-                        errors.add("business domain " + id + " 的 " + field + " 不能为空");
-                    }
                 }
                 validateReferences(array(domain, "depends_on"), domainIds, "business domain " + id + " depends_on", errors);
                 validateReferences(array(domain, "flow_ids"), flowIds, "business domain " + id + " flow_ids", errors);
@@ -176,11 +161,6 @@ public final class ReportValidator {
             if (!"single_trigger".equals(string(flow, "execution_scope"))) {
                 errors.add("业务流程 " + id + " 必须声明 execution_scope=single_trigger");
             }
-            for (String field : List.of("actor", "trigger", "routing_condition", "outcome", "end_title")) {
-                if (string(flow, field) == null || string(flow, field).isBlank()) {
-                    errors.add("业务流程 " + id + " 缺少 " + field);
-                }
-            }
             for (String field : List.of(
                     "preconditions", "data_reads", "data_writes", "failure_paths", "data_origins", "data_flow"
             )) {
@@ -190,10 +170,9 @@ public final class ReportValidator {
             JsonArray dataFlow = array(flow, "data_flow");
             JsonArray consumers = requireArray(flow, "consumer_targets", errors);
             if (origins != null && origins.isEmpty()) errors.add("业务流程 " + id + " 没有说明核心数据来源");
-            if (dataFlow != null && dataFlow.size() < 2) errors.add("业务流程 " + id + " 的数据流少于 2 个有序环节");
             JsonArray steps = array(flow, "children");
-            if (steps == null || steps.size() < 4) {
-                errors.add("业务流程 " + id + " 少于 4 个有序步骤，不能视为完整流程");
+            if (steps == null || steps.isEmpty()) {
+                errors.add("业务流程 " + id + " 没有源码支持的职责步骤");
                 continue;
             }
             validateConnectedBusinessFlow(flow, origins, dataFlow, consumers, steps, evidence, repositoryRoot, errors);
@@ -209,9 +188,7 @@ public final class ReportValidator {
             }
             JsonObject unknown = element.getAsJsonObject();
             String question = string(unknown, "question");
-            if (question == null || question.isBlank() || question.length() > 180) {
-                errors.add("待确认问题必须是 180 字以内的单一问题");
-            }
+            if (question == null || question.isBlank()) errors.add("待确认问题不能为空");
             if (!oneOf(string(unknown, "kind"), "entry", "origin", "rule", "state", "event", "outcome")) {
                 errors.add("待确认问题的 kind 非法");
             }
@@ -220,7 +197,6 @@ public final class ReportValidator {
                 validateReference(flowId, flowIds, "待确认问题 flow_id", errors);
             }
             JsonArray symbols = requireArray(unknown, "symbols", errors);
-            if (symbols != null && symbols.size() > 3) errors.add("每个待确认问题最多绑定 3 个精确符号");
             if (string(unknown, "why_material") == null || string(unknown, "why_material").isBlank()) {
                 errors.add("待确认问题缺少 why_material");
             }
@@ -239,11 +215,6 @@ public final class ReportValidator {
             if (!element.isJsonObject()) continue;
             JsonObject object = element.getAsJsonObject();
             String id = string(object, "id");
-            for (String field : List.of("name", "plain_meaning", "lifecycle")) {
-                if (string(object, field) == null || string(object, field).isBlank()) {
-                    errors.add("业务对象 " + id + " 缺少 " + field);
-                }
-            }
             if (!oneOf(string(object, "storage_kind"), "payload", "struct", "table", "event", "config", "unknown")) {
                 errors.add("业务对象 " + id + " 的 storage_kind 非法");
             }
@@ -252,7 +223,6 @@ public final class ReportValidator {
                 errors.add("已有源码证据的业务对象 " + id + " 不能把 storage_kind 留为 unknown");
             }
             JsonArray groups = requireArray(object, "field_groups", errors);
-            if (groups != null && groups.isEmpty()) errors.add("业务对象 " + id + " 没有解释关键字段分组");
             if (groups != null) {
                 for (JsonElement groupElement : groups) {
                     if (!groupElement.isJsonObject()) {
@@ -260,17 +230,11 @@ public final class ReportValidator {
                         continue;
                     }
                     JsonObject group = groupElement.getAsJsonObject();
-                    if (string(group, "name") == null || string(group, "meaning") == null) {
-                        errors.add("业务对象 " + id + " 的字段分组缺少 name 或 meaning");
-                    }
                     if (!oneOf(string(group, "role"),
                             "business_metric", "identity", "control", "audit_time", "content", "other")) {
                         errors.add("业务对象 " + id + " 的字段分组 role 非法");
                     }
                     JsonArray fields = requireArray(group, "fields", errors);
-                    if (fields != null && fields.isEmpty()) {
-                        errors.add("业务对象 " + id + " 的字段分组没有列出字段");
-                    }
                 }
             }
             validateBusinessSource(object, "业务对象 " + id, evidence, repositoryRoot, true, errors);
@@ -461,7 +425,9 @@ public final class ReportValidator {
             }
         }
         Set<Integer> primaryOrders = ordersByLineage.getOrDefault(primaryOriginId, Set.of());
-        if (primaryOrders.size() < 2) errors.add("业务流程 " + flowId + " 的 primary 数据血缘少于 2 个环节");
+        if (!primaryOriginId.isBlank() && !originIds.isEmpty() && primaryOrders.isEmpty()) {
+            errors.add("业务流程 " + flowId + " 的 primary 数据来源没有绑定任何数据环节");
+        }
         for (Map.Entry<String, Set<Integer>> entryOrder : ordersByLineage.entrySet()) {
             for (int order = 1; order <= entryOrder.getValue().size(); order++) {
                 if (!entryOrder.getValue().contains(order)) {

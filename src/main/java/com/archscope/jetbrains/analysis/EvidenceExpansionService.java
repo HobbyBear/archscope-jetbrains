@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.analysis;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.archscope.jetbrains.git.CodexWorkspaceService;
 import com.archscope.jetbrains.git.GitCli;
 import com.archscope.jetbrains.git.GitCommandException;
@@ -44,7 +45,7 @@ public final class EvidenceExpansionService {
 
         for (EvidencePlan.ChangeGroup group : plan.groups()) {
             indicator.checkCanceled();
-            indicator.setText("补全改动主题证据 · " + group.title());
+            indicator.setText(PluginLanguage.text("补全改动主题证据 · ", "Expanding change-topic evidence · ") + group.title());
             JsonObject groupResult = new JsonObject();
             groupResult.addProperty("group_id", group.id());
             JsonArray queryResults = new JsonArray();

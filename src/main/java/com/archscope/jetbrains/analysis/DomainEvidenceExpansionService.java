@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.analysis;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.archscope.jetbrains.git.CodexWorkspaceService;
 import com.archscope.jetbrains.git.GitCli;
 import com.archscope.jetbrains.git.GitCommandException;
@@ -70,7 +71,7 @@ public final class DomainEvidenceExpansionService {
 
         for (DomainEvidencePlan.Query query : plan.queries()) {
             indicator.checkCanceled();
-            indicator.setText("检索业务证据 · " + query.literal());
+            indicator.setText(PluginLanguage.text("检索业务证据 · ", "Searching business evidence · ") + query.literal());
             List<Match> rawMatches = new ArrayList<>();
             for (String literal : queryVariants(query.literal())) {
                 rawMatches.addAll(parseMatches(

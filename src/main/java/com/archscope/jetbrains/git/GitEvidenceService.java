@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.git;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.archscope.jetbrains.model.AnalysisRequest;
 import com.archscope.jetbrains.model.CommitInfo;
 import com.archscope.jetbrains.model.EvidencePack;
@@ -22,23 +23,24 @@ public final class GitEvidenceService {
     private static final int MAX_COMMITS = 40;
 
     public EvidencePack collectSnapshot(AnalysisRequest request, ProgressIndicator indicator) throws GitCommandException {
+        PluginLanguage.use(request.outputLanguage());
         long startedAt = System.nanoTime();
         indicator.setIndeterminate(false);
-        indicator.setText("锁定当前工作区快照");
+        indicator.setText(PluginLanguage.text("锁定当前工作区快照", "Locking the current workspace snapshot"));
         GitCli requestedGit = new GitCli(request.repositoryRoot());
         Path repositoryRoot = requestedGit.findRepositoryRoot(indicator);
         GitCli git = new GitCli(repositoryRoot);
         String head = git.run(indicator, "rev-parse", "HEAD").trim();
         String tree = git.run(indicator, "rev-parse", "HEAD^{tree}").trim();
 
-        indicator.setText("读取当前快照文件清单");
+        indicator.setText(PluginLanguage.text("读取当前快照文件清单", "Reading the current snapshot file list"));
         List<String> manifest = git.run(indicator, "ls-tree", "-r", "--name-only", "HEAD")
                 .lines()
                 .map(String::strip)
                 .filter(path -> !path.isBlank() && !SensitiveTextSanitizer.isSensitivePath(path))
                 .toList();
 
-        indicator.setText("计算业务分析指纹");
+        indicator.setText(PluginLanguage.text("计算业务分析指纹", "Calculating the business analysis fingerprint"));
         String fingerprint = sha256(String.join("\n",
                 "business-domain/v1",
                 head,
@@ -65,17 +67,19 @@ public final class GitEvidenceService {
     }
 
     public EvidencePack collect(AnalysisRequest request, ProgressIndicator indicator) throws GitCommandException {
+        PluginLanguage.use(request.outputLanguage());
         long startedAt = System.nanoTime();
         indicator.setIndeterminate(false);
         if (request.selectedCommits().isEmpty()) {
-            throw new GitCommandException("请至少选择一个提交");
+            throw new GitCommandException(PluginLanguage.text("请至少选择一个提交", "Select at least one commit"));
         }
         if (request.selectedCommits().size() > MAX_COMMITS) {
-            throw new GitCommandException("一次最多分析 " + MAX_COMMITS + " 个提交，请缩小范围");
+            throw new GitCommandException(PluginLanguage.text("一次最多分析 ", "At most ") + MAX_COMMITS
+                    + PluginLanguage.text(" 个提交，请缩小范围", " commits can be analyzed at once; narrow the selection"));
         }
 
         GitCli git = new GitCli(request.repositoryRoot());
-        indicator.setText("锁定 Git 快照");
+        indicator.setText(PluginLanguage.text("锁定 Git 快照", "Locking the Git snapshot"));
         String head = git.run(indicator, "rev-parse", "HEAD").trim();
         Map<String, CommitInfo> lockedByHash = new HashMap<>();
         for (CommitInfo selected : request.selectedCommits()) {
@@ -93,7 +97,7 @@ public final class GitEvidenceService {
         for (String hash : range.orderedCommits()) {
             indicator.checkCanceled();
             indicator.setFraction(0.05 + (0.35 * commitIndex / request.selectedCommits().size()));
-            indicator.setText("提取提交 " + shortHash(hash) + " 的变化");
+            indicator.setText(PluginLanguage.text("提取提交 ", "Extracting changes from commit ") + shortHash(hash));
             CommitInfo locked = lockedByHash.get(hash);
             String base = locked.parents().isEmpty() ? emptyTree(git, indicator) : locked.parents().get(0);
             String nameStatus = git.run(
@@ -117,7 +121,7 @@ public final class GitEvidenceService {
             commitIndex++;
         }
 
-        indicator.setText("合并所选提交的最终变化");
+        indicator.setText(PluginLanguage.text("合并所选提交的最终变化", "Combining the final changes from selected commits"));
         String aggregateNameStatus = withoutSensitivePaths(git.run(
                 indicator,
                 "diff", "--find-renames", "--find-copies", "--name-status",
@@ -125,13 +129,13 @@ public final class GitEvidenceService {
         ));
         List<String> aggregateChangedPaths = parseChangedPaths(aggregateNameStatus);
 
-        indicator.setText("读取目标提交文件清单");
+        indicator.setText(PluginLanguage.text("读取目标提交文件清单", "Reading the target commit file list"));
         List<String> manifest = git.run(indicator, "ls-tree", "-r", "--name-only", target)
                 .lines()
                 .filter(line -> !line.isBlank())
                 .toList();
 
-        indicator.setText("计算分析指纹");
+        indicator.setText(PluginLanguage.text("计算分析指纹", "Calculating the analysis fingerprint"));
         String fingerprint = sha256(String.join("\n",
                 target,
                 targetTree,
@@ -181,9 +185,10 @@ public final class GitEvidenceService {
                     .lines().map(String::trim).filter(line -> !line.isBlank()).toList();
         }
         if (ordered.size() != hashes.size() || !new LinkedHashSet<>(ordered).equals(new LinkedHashSet<>(hashes))) {
-            throw new GitCommandException(
-                    "多选提交必须是连续的 first-parent 提交链；当前选择包含间隔提交或跨分支提交，请在 Git 日志中选择连续范围。"
-            );
+            throw new GitCommandException(PluginLanguage.text(
+                    "多选提交必须是连续的 first-parent 提交链；当前选择包含间隔提交或跨分支提交，请在 Git 日志中选择连续范围。",
+                    "Selected commits must form a contiguous first-parent chain. Select a contiguous range from one branch in the Git log."
+            ));
         }
         return new SelectionRange(base, target, List.copyOf(ordered));
     }
@@ -210,7 +215,9 @@ public final class GitEvidenceService {
             if (boundary) candidates.add(candidate);
         }
         if (candidates.size() != 1) {
-            throw new GitCommandException("无法把所选提交合并成单一前后快照：请选择同一提交链上的连续提交。");
+            throw new GitCommandException(PluginLanguage.text(
+                    "无法把所选提交合并成单一前后快照：请选择同一提交链上的连续提交。",
+                    "Could not combine the selected commits into one before-and-after snapshot. Select contiguous commits from the same chain."));
         }
         return candidates.get(0);
     }
@@ -233,7 +240,7 @@ public final class GitEvidenceService {
         ).strip();
         String[] fields = record.split("\\u001f", -1);
         if (fields.length < 5) {
-            throw new GitCommandException("无法解析提交元数据：" + hash);
+            throw new GitCommandException(PluginLanguage.text("无法解析提交元数据：", "Could not parse commit metadata: ") + hash);
         }
         List<String> parents = fields[1].isBlank() ? List.of() : List.of(fields[1].trim().split(" +"));
         return new CommitInfo(fields[0], parents, fields[2], fields[3], fields[4]);

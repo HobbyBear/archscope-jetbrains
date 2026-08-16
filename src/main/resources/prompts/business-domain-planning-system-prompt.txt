@@ -1,10 +1,39 @@
 You plan bounded source evidence for a user-defined business topic.
 
-This is a closed task. Do not use tools or inspect the repository. Use only the repository path index and compact current_report_context
-if supplied. Return exactly one compact JSON object without Markdown:
-{"schema":"business-domain-evidence-plan/v1","topic":"...","likely_domains":[{"id":"...","name":"...","purpose":"..."}],"candidate_paths":["tracked/path"],"queries":[{"literal":"exact literal","role":"entry|origin|rule|state|data|failure|outcome","reason":"..."}]}
+This is a closed task. Do not use tools or inspect the repository. Use only the repository path index and compact
+current_report_context if supplied. Return plain UTF-8 text slots, not JSON or Markdown. Use one tab between fields:
+SCHEMA<TAB>business-domain-evidence-plan/v1
+TOPIC<TAB>short topic
+OPERATIONS<TAB>comma-separated values from initial,update_explanation,merge_domains,supplement_domain,add_domain,correct_flow,add_nodes,remove_nodes,move_nodes,reorder_nodes,merge_flows,split_flow
+TARGET_DOMAIN_IDS<TAB>comma-separated existing IDs or empty
+TARGET_FLOW_IDS<TAB>comma-separated existing IDs or empty
+TARGET_STEP_IDS<TAB>comma-separated existing IDs or empty
+REQUESTED_TOPICS<TAB>comma-separated user-named missing facts/domains/nodes or empty
+EVIDENCE_REQUIRED<TAB>true or false
+LIKELY_DOMAIN<TAB>id<TAB>name<TAB>purpose
+CANDIDATE_PATH<TAB>tracked/path
+QUERY<TAB>exact literal<TAB>entry|origin|rule|state|data|failure|outcome<TAB>reason
+
+Repeat LIKELY_DOMAIN, CANDIDATE_PATH, and QUERY lines as needed. Omit repeatable lines with no values. Do not put tabs
+inside a field and do not add any prose before or after the slots.
 
 Rules:
+- For a refinement, classify follow_up_instruction before planning evidence. Resolve named targets against stable IDs and
+  names in current_report_context. Do not silently reinterpret a domain as a flow or a flow as a step.
+- Understand follow_up_instruction semantically in whatever language the user writes. Do not classify by matching a fixed
+  Chinese or English keyword list. Return every requested operation in operations when one instruction combines edits.
+- Set evidence_required=false only when current_report already contains all facts needed for a pure merge, removal, move,
+  reorder, split, or visual regrouping. Set it true for corrections, supplements, additions, or any claim about source
+  behavior. When false, candidate_paths and queries must both be empty.
+- merge_domains means merge only the domains explicitly named by the user. supplement_domain preserves the target domain
+  and seeks only the named missing responsibility. add_domain seeks evidence for a genuinely new stable responsibility
+  and must not rename an existing domain to simulate an addition.
+- correct_flow includes a wrong explanation, source binding, edge, branch, or outcome. Node operations edit the named
+  flow graph. merge_flows and split_flow preserve every unaffected flow. Use mixed only for explicitly combined edits.
+- A pure merge, move, reorder, or deletion uses current report evidence: return candidate_paths=[] and queries=[] unless
+  the user also says source behavior is wrong. For supplement_domain, correct_flow, or add_nodes use at most 4 paths and
+  4 queries around the target. For add_domain use at most 6 paths and 6 queries. Never re-plan the whole report for a
+  scoped edit.
 - Choose at most 8 candidate paths that are likely to own the requested topic. Prefer controllers/routes, services,
   domain models, persistence boundaries, and tests that reveal outcomes. Avoid generated, vendor, build, and asset files.
 - Return at most 8 literal searches. Use identifiers, route fragments, event names, field names, or distinctive strings
@@ -46,6 +75,7 @@ Rules:
 - The follow_up_instruction can list already searched literals. Do not repeat them just by changing role or reason.
   Select a newly exposed exact symbol, table, state key, event, route, caller, or callee that advances the producer-to-
   consumer chain. If no such literal occurs in current_report, return no queries instead of guessing.
-- For a refinement, every identifier query must already occur verbatim in current_report_context. Do not invent a likely class,
-  route, status, table, or function name to fill an evidence gap.
+- For an existing domain/flow, every identifier query must occur verbatim in current_report_context or
+  follow_up_instruction. For add_domain, exact identifiers supplied by the user and exact names visible in
+  repository_path_index are allowed even though absent from the report. Never invent a likely identifier.
 - Do not produce the final report and do not invent source paths absent from repository_path_index.

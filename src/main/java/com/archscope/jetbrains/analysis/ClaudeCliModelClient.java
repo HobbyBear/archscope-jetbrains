@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.analysis;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -58,14 +59,22 @@ public final class ClaudeCliModelClient implements ModelClient {
                     .start();
             updateProgress(indicator, statusListener, "Claude CLI · " + stage);
             String prompt = systemPrompt + "\n\nUSER EVIDENCE REQUEST:\n" + userPrompt;
-            try (OutputStreamWriter writer = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8)) {
-                writer.write(prompt);
-            }
-
             Process runningProcess = process;
             CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(
                     () -> readOutput(runningProcess, indicator, stage, statusListener)
             );
+            try (OutputStreamWriter writer = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8)) {
+                writer.write(prompt);
+            } catch (IOException exception) {
+                if (!process.waitFor(1, TimeUnit.SECONDS)) throw exception;
+                String output = outputFuture.get(5, TimeUnit.SECONDS);
+                throw new ModelClientException(
+                        PluginLanguage.text("Claude CLI 执行失败（exit ", "Claude CLI failed (exit ")
+                                + process.exitValue() + PluginLanguage.text("）：", "): ") + failureMessage(output),
+                        exception
+                );
+            }
+
             long deadline = System.nanoTime() + MAX_RUNTIME.toNanos();
             long lastProgressSecond = -5;
             while (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
@@ -75,19 +84,21 @@ public final class ClaudeCliModelClient implements ModelClient {
                 }
                 if (System.nanoTime() > deadline) {
                     terminate(process);
-                    throw new ModelClientException("Claude CLI 执行超过 30 分钟，已终止");
+                    throw new ModelClientException(PluginLanguage.text("Claude CLI 执行超过 30 分钟，已终止",
+                            "Claude CLI exceeded 30 minutes and was terminated"));
                 }
                 long elapsedSeconds = (System.nanoTime() - startedAt) / 1_000_000_000;
                 if (elapsedSeconds >= lastProgressSecond + 5) {
                     updateProgress(indicator, statusListener,
-                            "Claude CLI · " + stage + " · " + elapsedSeconds + " 秒");
+                            "Claude CLI · " + stage + " · " + elapsedSeconds + PluginLanguage.text(" 秒", "s"));
                     lastProgressSecond = elapsedSeconds;
                 }
             }
             String output = outputFuture.get(5, TimeUnit.SECONDS);
             if (process.exitValue() != 0) {
                 throw new ModelClientException(
-                        "Claude CLI 执行失败（exit " + process.exitValue() + "）：" + abbreviate(output, 2400)
+                        PluginLanguage.text("Claude CLI 执行失败（exit ", "Claude CLI failed (exit ")
+                                + process.exitValue() + PluginLanguage.text("）：", "): ") + failureMessage(output)
                 );
             }
             String result = extractResult(output);
@@ -99,14 +110,17 @@ public final class ClaudeCliModelClient implements ModelClient {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             if (process != null) terminate(process);
-            throw new ModelClientException("Claude CLI 请求被中断", exception);
+            throw new ModelClientException(PluginLanguage.text("Claude CLI 请求被中断",
+                    "The Claude CLI request was interrupted"), exception);
         } catch (ExecutionException | TimeoutException exception) {
             if (process != null) terminate(process);
-            throw new ModelClientException("读取 Claude CLI 输出失败：" + exception.getMessage(), exception);
+            throw new ModelClientException(PluginLanguage.text("读取 Claude CLI 输出失败：",
+                    "Failed to read Claude CLI output: ") + exception.getMessage(), exception);
         } catch (IOException exception) {
             throw new ModelClientException(
-                    "无法启动 Claude CLI：" + exception.getMessage()
-                            + "。请先确认 Claude CLI 已安装、已登录并能在终端中运行。",
+                    PluginLanguage.text("无法启动 Claude CLI：", "Could not start Claude CLI: ") + exception.getMessage()
+                            + PluginLanguage.text("。请先确认 Claude CLI 已安装、已登录并能在终端中运行。",
+                            ". Make sure Claude CLI is installed, signed in, and runs in a terminal."),
                     exception
             );
         } finally {
@@ -129,12 +143,7 @@ public final class ClaudeCliModelClient implements ModelClient {
                 "-p",
                 "--output-format", "stream-json",
                 "--verbose",
-                "--no-session-persistence",
-                "--permission-mode", "dontAsk",
-                "--strict-mcp-config",
-                "--mcp-config", "{\"mcpServers\":{}}",
-                "--disable-slash-commands",
-                "--tools", workspaceAccess == WorkspaceAccess.READ_ONLY_REPOSITORY ? "Read,Glob,Grep" : ""
+                "--no-session-persistence"
         ));
         return List.copyOf(command);
     }
@@ -165,7 +174,30 @@ public final class ClaudeCliModelClient implements ModelClient {
             }
         }
         if (!assistantText.isBlank()) return assistantText;
-        throw new ModelClientException("Claude CLI 没有返回可解析的最终文本：" + abbreviate(output, 1800));
+        throw new ModelClientException(PluginLanguage.text("Claude CLI 没有返回可解析的最终文本：",
+                "Claude CLI did not return parseable final text: ") + abbreviate(output, 1800));
+    }
+
+    String failureMessage(String output) {
+        String structured = "";
+        for (String line : output.lines().toList()) {
+            if (!line.stripLeading().startsWith("{")) continue;
+            try {
+                JsonObject event = JsonParser.parseString(line).getAsJsonObject();
+                if (!"result".equals(string(event, "type")) || !booleanValue(event, "is_error")) continue;
+                String result = string(event, "result");
+                if (!result.isBlank()) {
+                    structured = result;
+                } else if (event.has("errors")) {
+                    structured = event.get("errors").toString();
+                } else {
+                    structured = string(event, "subtype");
+                }
+            } catch (RuntimeException ignored) {
+                // Non-JSON notices are handled by the tail fallback below.
+            }
+        }
+        return structured.isBlank() ? abbreviateTail(output, 2400) : abbreviate(structured, 2400);
     }
 
     private String readOutput(
@@ -184,7 +216,8 @@ public final class ClaudeCliModelClient implements ModelClient {
                 output.append(line).append('\n');
                 if (line.stripLeading().startsWith("{")) {
                     events++;
-                    updateProgress(indicator, statusListener, "Claude CLI · " + stage + " · 事件 " + events);
+                    updateProgress(indicator, statusListener, "Claude CLI · " + stage
+                            + PluginLanguage.text(" · 事件 ", " · event ") + events);
                 }
             }
             return output.toString();
@@ -212,6 +245,7 @@ public final class ClaudeCliModelClient implements ModelClient {
             Consumer<String> statusListener,
             String message
     ) {
+        message = PluginLanguage.userMessage(message);
         indicator.setText(message);
         statusListener.accept(message);
     }
@@ -242,6 +276,13 @@ public final class ClaudeCliModelClient implements ModelClient {
     private String abbreviate(String value, int maxLength) {
         String stripped = value.strip();
         return stripped.length() <= maxLength ? stripped : stripped.substring(0, maxLength) + "...";
+    }
+
+    private String abbreviateTail(String value, int maxLength) {
+        String stripped = value.strip();
+        return stripped.length() <= maxLength
+                ? stripped
+                : "... output truncated ...\n" + stripped.substring(stripped.length() - maxLength);
     }
 
     private static final class CliOutputRuntimeException extends RuntimeException {

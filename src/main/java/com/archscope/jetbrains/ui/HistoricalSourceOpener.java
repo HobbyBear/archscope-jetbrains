@@ -4,11 +4,11 @@ import com.archscope.jetbrains.git.GitCli;
 import com.archscope.jetbrains.git.GitCommandException;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.intellij.ide.util.PsiNavigationSupport;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.editor.Document;
-import com.intellij.openapi.fileEditor.FileEditorManager;
-import com.intellij.openapi.fileEditor.OpenFileDescriptor;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileTypes.FileTypeManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.LocalFileSystem;
@@ -42,11 +42,12 @@ final class HistoricalSourceOpener {
         int line = source.has("line") ? Math.max(1, source.get("line").getAsInt()) : 1;
         if (path.isBlank()) return;
 
-        ApplicationManager.getApplication().invokeLater(() -> {
-            if (openWorkingTree(project, repositoryRoot, path, line, symbol)) return;
-            if (commit.isBlank()) return;
-            openHistoricalSnapshot(project, repositoryRoot, path, commit, line);
-        });
+        if (!commit.isBlank()) {
+            openHistoricalSnapshot(project, repositoryRoot, path, commit, line, symbol);
+            return;
+        }
+        ApplicationManager.getApplication().invokeLater(
+                () -> openWorkingTree(project, repositoryRoot, path, line, symbol));
     }
 
     private static void openHistoricalSnapshot(
@@ -54,19 +55,29 @@ final class HistoricalSourceOpener {
             Path repositoryRoot,
             String path,
             String commit,
-            int line
+            int line,
+            String symbol
     ) {
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             try {
                 String content = new GitCli(repositoryRoot).run(null, "show", commit + ":" + path);
-                ApplicationManager.getApplication().invokeLater(() -> openSnapshot(project, path, commit, line, content));
+                ApplicationManager.getApplication().invokeLater(
+                        () -> openSnapshot(project, path, commit, line, symbol, content)
+                );
             } catch (GitCommandException ignored) {
-                // The current branch was already tried; there is no safe source target left to open.
+                // A snapshot link must never silently navigate to a different working-tree version.
             }
         });
     }
 
-    private static void openSnapshot(Project project, String path, String commit, int line, String content) {
+    private static void openSnapshot(
+            Project project,
+            String path,
+            String commit,
+            int line,
+            String symbol,
+            String content
+    ) {
         String shortCommit = commit.length() > 10 ? commit.substring(0, 10) : commit;
         LightVirtualFile file = new LightVirtualFile(
                 path + " @ " + shortCommit,
@@ -74,7 +85,7 @@ final class HistoricalSourceOpener {
                 content
         );
         file.setWritable(false);
-        FileEditorManager.getInstance(project).openTextEditor(new OpenFileDescriptor(project, file, line - 1, 0), true);
+        navigateWithPsi(project, file, line, symbol);
     }
 
     private static boolean openWorkingTree(
@@ -87,23 +98,31 @@ final class HistoricalSourceOpener {
         VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(repositoryRoot.resolve(path));
         if (file == null || file.isDirectory()) return false;
 
-        PsiElement target = ReadAction.compute(() -> findPsiTarget(project, file, line, symbol));
-        if (target != null && target.isValid()
-                && target instanceof Navigatable navigatable && navigatable.canNavigate()) {
-            navigatable.navigate(true);
-        } else {
-            FileEditorManager.getInstance(project).openTextEditor(
-                    new OpenFileDescriptor(project, file, Math.max(0, line - 1), 0),
-                    true
-            );
-        }
+        return navigateWithPsi(project, file, line, symbol);
+    }
+
+    private static boolean navigateWithPsi(
+            Project project,
+            VirtualFile file,
+            int line,
+            String symbol
+    ) {
+        PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
+        if (psiFile == null) return false;
+        PsiDocumentManager documentManager = PsiDocumentManager.getInstance(project);
+        Document psiDocument = documentManager.getDocument(psiFile);
+        Document document = psiDocument != null ? psiDocument : FileDocumentManager.getInstance().getDocument(file);
+        if (psiDocument != null) documentManager.commitDocument(psiDocument);
+        PsiElement target = ReadAction.compute(() -> findPsiTarget(psiFile, document, line, symbol));
+        if (target == null || !target.isValid()) return false;
+        int offset = ReadAction.compute(target::getTextOffset);
+        Navigatable navigatable = PsiNavigationSupport.getInstance().createNavigatable(project, file, offset);
+        if (!navigatable.canNavigate()) return false;
+        navigatable.navigate(true);
         return true;
     }
 
-    private static PsiElement findPsiTarget(Project project, VirtualFile file, int line, String symbol) {
-        PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
-        if (psiFile == null) return null;
-        Document document = PsiDocumentManager.getInstance(project).getDocument(psiFile);
+    static PsiElement findPsiTarget(PsiFile psiFile, Document document, int line, String symbol) {
         if (document == null || document.getLineCount() == 0) return psiFile;
         int lineIndex = Math.min(Math.max(0, line - 1), document.getLineCount() - 1);
         int offset = firstContentOffset(document, lineIndex);
@@ -111,9 +130,16 @@ final class HistoricalSourceOpener {
         if (!expectedName.isEmpty()) {
             PsiNamedElement named = PsiTreeUtil.findChildrenOfType(psiFile, PsiNamedElement.class).stream()
                     .filter(element -> expectedName.equals(normalizeSymbol(element.getName())))
-                    .min(Comparator.comparingInt(element -> Math.abs(element.getTextOffset() - offset)))
+                    .min(Comparator
+                            .comparingInt((PsiNamedElement element) -> element.getTextRange().containsOffset(offset) ? 0 : 1)
+                            .thenComparingInt(element -> Math.abs(element.getTextOffset() - offset)))
                     .orElse(null);
-            if (named != null) return named;
+            if (named == null) return null;
+            if (named.getTextRange().containsOffset(offset)) {
+                PsiElement anchor = psiFile.findElementAt(Math.min(offset, Math.max(0, psiFile.getTextLength() - 1)));
+                if (anchor != null && PsiTreeUtil.isAncestor(named, anchor, false)) return anchor;
+            }
+            return named;
         }
         PsiElement element = psiFile.findElementAt(Math.min(offset, Math.max(0, psiFile.getTextLength() - 1)));
         return element == null ? psiFile : element;

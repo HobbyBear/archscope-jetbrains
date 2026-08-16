@@ -49,6 +49,11 @@ Rules:
 - Set requires_structural_rebuild=true and leave all update arrays empty when the instruction requires adding, deleting,
   merging, splitting, or reordering a flow, step, domain, or primary source node. Do the same when bounded evidence cannot
   prove the requested correction.
+- Treat the user as the editor of the business graph. A wrong explanation may update text in place. A wrong source
+  binding, missing node, missing branch, incomplete flow, moved/reordered node, merged/split flow, merged domain, or new
+  domain is structural and must request a rebuild instead of pretending a summary-only patch applied it.
+- When an existing domain lacks X, update only that domain and directly affected flows/steps. When domain X itself is
+  missing, do not update a similarly named existing domain; request a structural rebuild.
 - Existing IDs are an allowlist. Update only IDs present in current_report_context. Never add an unknown or return a
   replacement report. Omit every field that does not need to change.
 - Arrays in an update are complete replacements for that one field. Preserve all existing entries still correct. For

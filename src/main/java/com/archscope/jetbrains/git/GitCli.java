@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.git;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.ProcessCanceledException;
 
@@ -23,7 +24,8 @@ public final class GitCli {
     public Path findRepositoryRoot(ProgressIndicator indicator) throws GitCommandException {
         String output = run(indicator, "rev-parse", "--show-toplevel").trim();
         if (output.isEmpty()) {
-            throw new GitCommandException("当前项目不在 Git 仓库中");
+            throw new GitCommandException(PluginLanguage.text("当前项目不在 Git 仓库中",
+                    "The current project is not inside a Git repository"));
         }
         return Path.of(output).toAbsolutePath().normalize();
     }
@@ -31,7 +33,8 @@ public final class GitCli {
     public String run(ProgressIndicator indicator, String... arguments) throws GitCommandException {
         CommandResult result = execute(indicator, arguments);
         if (result.exitCode() != 0) {
-            throw new GitCommandException("Git 命令失败 (" + result.exitCode() + ")：" + abbreviate(result.output(), 2000));
+            throw new GitCommandException(PluginLanguage.text("Git 命令失败 (", "Git command failed (")
+                    + result.exitCode() + PluginLanguage.text(")：", "): ") + abbreviate(result.output(), 2000));
         }
         return result.output();
     }
@@ -40,7 +43,8 @@ public final class GitCli {
         CommandResult result = execute(indicator, "merge-base", "--is-ancestor", ancestor, descendant);
         if (result.exitCode() == 0) return true;
         if (result.exitCode() == 1) return false;
-        throw new GitCommandException("无法判断提交祖先关系：" + abbreviate(result.output(), 1200));
+        throw new GitCommandException(PluginLanguage.text("无法判断提交祖先关系：",
+                "Could not determine the commit ancestry: ") + abbreviate(result.output(), 1200));
     }
 
     public String grep(ProgressIndicator indicator, String revision, String literal) throws GitCommandException {
@@ -50,7 +54,8 @@ public final class GitCli {
         );
         if (result.exitCode() == 0) return result.output();
         if (result.exitCode() == 1) return "";
-        throw new GitCommandException("Git 搜索失败：" + abbreviate(result.output(), 1200));
+        throw new GitCommandException(PluginLanguage.text("Git 搜索失败：", "Git search failed: ")
+                + abbreviate(result.output(), 1200));
     }
 
     private CommandResult execute(ProgressIndicator indicator, String... arguments) throws GitCommandException {
@@ -66,7 +71,8 @@ public final class GitCli {
                     .redirectErrorStream(true)
                     .start();
         } catch (IOException exception) {
-            throw new GitCommandException("无法启动 Git，请确认 git 已安装并位于 PATH：" + exception.getMessage());
+            throw new GitCommandException(PluginLanguage.text("无法启动 Git，请确认 git 已安装并位于 PATH：",
+                    "Could not start Git. Make sure Git is installed and available on PATH: ") + exception.getMessage());
         }
 
         ByteArrayOutputStream captured = new ByteArrayOutputStream();
@@ -91,10 +97,11 @@ public final class GitCli {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             process.destroyForcibly();
-            throw new GitCommandException("Git 命令被中断");
+            throw new GitCommandException(PluginLanguage.text("Git 命令被中断", "The Git command was interrupted"));
         } catch (IOException exception) {
             process.destroyForcibly();
-            throw new GitCommandException("读取 Git 输出失败：" + exception.getMessage());
+            throw new GitCommandException(PluginLanguage.text("读取 Git 输出失败:", "Failed to read Git output: ")
+                    + exception.getMessage());
         }
     }
 

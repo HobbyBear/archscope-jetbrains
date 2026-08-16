@@ -22,13 +22,36 @@ final class ClaudeCliModelClientTest {
     }
 
     @Test
-    void disablesToolsForClosedEvidenceAndAllowsOnlyReadToolsForRepositoryExploration() {
+    void reportsStructuredFailureAfterVerboseHookOutput() {
+        String output = "hook".repeat(3000) + "\n"
+                + "{\"type\":\"result\",\"subtype\":\"error_during_execution\","
+                + "\"is_error\":true,\"result\":\"Prompt is too long\"}\n";
+
+        assertEquals("Prompt is too long", client.failureMessage(output));
+    }
+
+    @Test
+    void fallsBackToTheEndOfUnstructuredFailureOutput() {
+        String output = "startup hook\n" + "x".repeat(3000) + "\nactual failure";
+
+        String message = client.failureMessage(output);
+
+        assertTrue(message.startsWith("... output truncated ..."));
+        assertTrue(message.endsWith("actual failure"));
+    }
+
+    @Test
+    void preservesLocalClaudeRuntimeConfigurationForEveryWorkspaceMode() {
         List<String> closed = client.command(ModelClient.WorkspaceAccess.CLOSED_EVIDENCE);
         List<String> repository = client.command(ModelClient.WorkspaceAccess.READ_ONLY_REPOSITORY);
 
-        assertTrue(closed.containsAll(List.of("--no-session-persistence", "--strict-mcp-config")));
+        assertEquals(closed, repository);
+        assertTrue(closed.containsAll(List.of("-p", "--output-format", "stream-json", "--no-session-persistence")));
         assertFalse(closed.contains("--setting-sources"));
-        assertEquals("", closed.get(closed.indexOf("--tools") + 1));
-        assertEquals("Read,Glob,Grep", repository.get(repository.indexOf("--tools") + 1));
+        assertFalse(closed.contains("--permission-mode"));
+        assertFalse(closed.contains("--strict-mcp-config"));
+        assertFalse(closed.contains("--mcp-config"));
+        assertFalse(closed.contains("--disable-slash-commands"));
+        assertFalse(closed.stream().anyMatch(argument -> argument.startsWith("--tools")));
     }
 }

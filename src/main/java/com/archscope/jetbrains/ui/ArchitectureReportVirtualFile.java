@@ -11,7 +11,7 @@ import java.nio.file.Path;
 final class ArchitectureReportVirtualFile extends LightVirtualFile {
     private final Path repositoryRoot;
     private final AnalysisRequest request;
-    private final EvidencePack evidence;
+    private volatile EvidencePack evidence;
     private volatile AnalysisResult currentResult;
 
     ArchitectureReportVirtualFile(AnalysisResult result, Path repositoryRoot) {
@@ -57,7 +57,11 @@ final class ArchitectureReportVirtualFile extends LightVirtualFile {
     }
 
     boolean supportsRefinement() {
-        return request != null && evidence != null;
+        return request != null;
+    }
+
+    void updateEvidence(EvidencePack evidence) {
+        this.evidence = evidence;
     }
 
     void updateResult(AnalysisResult result) {

@@ -61,6 +61,10 @@ final class ReportRendererTest {
         assertTrue(html.contains("class=\"object-sources\""));
         assertFalse(html.contains("<code data-source='${payload}'"));
         assertTrue(html.contains("identity:'身份标识'"));
+        assertTrue(html.contains("model_provider_name"));
+        assertTrue(html.contains("已应用自定义提示词"));
+        assertTrue(html.contains("function reportCommit()"));
+        assertFalse(html.contains("IS_DOMAIN?'':REPORT.comparison?.target_commit"));
     }
 
     @Test
@@ -83,5 +87,20 @@ final class ReportRendererTest {
         String html = new ReportRenderer().render(JsonParser.parseString("{\"title\":\"Test\"}").getAsJsonObject(), true);
 
         assertTrue(html.contains("DEFAULT_THEME='dark'"));
+    }
+
+    @Test
+    void rendersEnglishReportsWithoutChineseUiText() {
+        String html = new ReportRenderer().render(JsonParser.parseString("""
+                {"title":"Chat logic","summary":"How a request becomes a streamed response",
+                 "output_language":"en","comparison":{"mode":"current_snapshot"},
+                 "business_overview":{"purpose":"Explain chat behavior"},"business_domains":[],
+                 "flow_map":{"id":"root","execution":"independent","children":[]}}
+                """).getAsJsonObject());
+
+        assertTrue(html.contains("<html lang=\"en\">"));
+        assertTrue(html.contains("Business overview"));
+        assertTrue(html.contains("Complete flows"));
+        assertFalse(html.matches("(?s).*[\\p{IsHan}].*"));
     }
 }

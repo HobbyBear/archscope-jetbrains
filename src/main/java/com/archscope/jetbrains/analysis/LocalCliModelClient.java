@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.analysis;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.intellij.openapi.diagnostic.Logger;
@@ -33,7 +34,7 @@ public final class LocalCliModelClient implements ModelClient {
 
     @Override
     public String displayName() {
-        return "本机 Codex";
+        return PluginLanguage.text("本机 Codex", "Local Codex");
     }
 
     public String complete(
@@ -42,7 +43,8 @@ public final class LocalCliModelClient implements ModelClient {
             Path workingDirectory,
             ProgressIndicator indicator
     ) throws ModelClientException {
-        return complete(systemPrompt, userPrompt, workingDirectory, indicator, "分析代码变化", ignored -> {});
+        return complete(systemPrompt, userPrompt, workingDirectory, indicator,
+                PluginLanguage.text("分析代码变化", "Analyze code changes"), ignored -> {});
     }
 
     public String complete(
@@ -88,16 +90,24 @@ public final class LocalCliModelClient implements ModelClient {
         long startedAt = System.nanoTime();
         try {
             List<String> command = command(stage, workspaceAccess);
-            ProcessBuilder builder = new ProcessBuilder(command)
-                    .directory(workingDirectory.toFile())
-                    .redirectErrorStream(true);
+            ProcessBuilder builder = processBuilder(command, workingDirectory);
             process = builder.start();
-            updateProgress(indicator, statusListener, "本机 Codex · " + stage);
+            updateProgress(indicator, statusListener, PluginLanguage.text("本机 Codex · ", "Local Codex · ") + stage);
             LOG.info("Local Codex started: stage=" + stage + ", executable=" + command.get(0));
 
             String prompt = systemPrompt + "\n\nUSER EVIDENCE REQUEST:\n" + userPrompt;
             try (OutputStreamWriter writer = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8)) {
                 writer.write(prompt);
+            } catch (IOException writeFailure) {
+                String earlyOutput = readOutput(process, indicator, stage, statusListener);
+                if (!earlyOutput.isBlank()) {
+                    throw new ModelClientException(
+                            PluginLanguage.text("本机 Codex 在接收提示词前退出：",
+                                    "Local Codex exited before receiving the prompt: ") + abbreviate(earlyOutput, 2400),
+                            writeFailure
+                    );
+                }
+                throw writeFailure;
             }
 
             Process runningProcess = process;
@@ -113,18 +123,21 @@ public final class LocalCliModelClient implements ModelClient {
                 }
                 if (System.nanoTime() > deadline) {
                     terminate(process);
-                    throw new ModelClientException("本机 Codex 执行超过 30 分钟，已终止");
+                    throw new ModelClientException(PluginLanguage.text("本机 Codex 执行超过 30 分钟，已终止",
+                            "Local Codex exceeded 30 minutes and was terminated"));
                 }
                 long elapsedSeconds = (System.nanoTime() - startedAt) / 1_000_000_000;
                 if (elapsedSeconds >= lastProgressSecond + 5) {
-                    updateProgress(indicator, statusListener, "本机 Codex · " + stage + " · " + elapsedSeconds + " 秒");
+                    updateProgress(indicator, statusListener, PluginLanguage.text("本机 Codex · ", "Local Codex · ")
+                            + stage + " · " + elapsedSeconds + PluginLanguage.text(" 秒", "s"));
                     lastProgressSecond = elapsedSeconds;
                 }
             }
             String output = outputFuture.get(5, TimeUnit.SECONDS);
             if (process.exitValue() != 0) {
                 throw new ModelClientException(
-                        "本机 Codex 执行失败（exit " + process.exitValue() + "）："
+                        PluginLanguage.text("本机 Codex 执行失败（exit ", "Local Codex failed (exit ")
+                                + process.exitValue() + PluginLanguage.text("）：", "): ")
                                 + abbreviate(output, 2400)
                 );
             }
@@ -138,14 +151,17 @@ public final class LocalCliModelClient implements ModelClient {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             if (process != null) terminate(process);
-            throw new ModelClientException("本机模型 CLI 请求被中断", exception);
+            throw new ModelClientException(PluginLanguage.text("本机模型 CLI 请求被中断",
+                    "The local model CLI request was interrupted"), exception);
         } catch (ExecutionException | TimeoutException exception) {
             if (process != null) terminate(process);
-            throw new ModelClientException("读取本机模型 CLI 输出失败：" + exception.getMessage(), exception);
+            throw new ModelClientException(PluginLanguage.text("读取本机模型 CLI 输出失败：",
+                    "Failed to read local model CLI output: ") + exception.getMessage(), exception);
         } catch (IOException exception) {
             throw new ModelClientException(
-                    "无法启动本机 Codex：" + exception.getMessage()
-                            + "。请先确认 Codex CLI 已安装、已登录并能在终端中运行。",
+                    PluginLanguage.text("无法启动本机 Codex：", "Could not start Local Codex: ") + exception.getMessage()
+                            + PluginLanguage.text("。请先确认 Codex CLI 已安装、已登录并能在终端中运行。",
+                            ". Make sure Codex CLI is installed, signed in, and runs in a terminal."),
                     exception
             );
         } finally {
@@ -154,7 +170,7 @@ public final class LocalCliModelClient implements ModelClient {
     }
 
     List<String> command() {
-        return command("分析代码变化");
+        return command(PluginLanguage.text("分析代码变化", "Analyze code changes"));
     }
 
     List<String> command(String stage) {
@@ -173,6 +189,16 @@ public final class LocalCliModelClient implements ModelClient {
             }
         }
         return codexCommand(List.of("codex"), stage, workspaceAccess);
+    }
+
+    ProcessBuilder processBuilder(List<String> command, Path workingDirectory) {
+        ProcessBuilder builder = new ProcessBuilder(command)
+                .directory(workingDirectory.toFile())
+                .redirectErrorStream(true);
+        // IDE launchers can inject bundled native libraries that are incompatible with
+        // external Node-based CLIs. Let Codex resolve the same libraries as a terminal does.
+        builder.environment().remove("LD_LIBRARY_PATH");
+        return builder;
     }
 
     private List<String> codexCommand(List<String> prefix, String stage, WorkspaceAccess workspaceAccess) {
@@ -198,7 +224,11 @@ public final class LocalCliModelClient implements ModelClient {
                 || stage.contains("业务理解报告")
                 || stage.contains("补充业务报告")
                 || stage.contains("增量更新业务报告")
-                || stage.contains("收敛待确认项");
+                || stage.contains("收敛待确认项")
+                || stage.contains("Identify")
+                || stage.contains("business report")
+                || stage.contains("business logic report")
+                || stage.contains("Resolve unknowns");
     }
 
     String extractResult(String output) throws ModelClientException {
@@ -219,7 +249,8 @@ public final class LocalCliModelClient implements ModelClient {
             }
         }
         if (!assistantText.isBlank()) return assistantText;
-        throw new ModelClientException("本机 Codex 没有返回可解析的最终文本：" + abbreviate(output, 1800));
+        throw new ModelClientException(PluginLanguage.text("本机 Codex 没有返回可解析的最终文本：",
+                "Local Codex did not return parseable final text: ") + abbreviate(output, 1800));
     }
 
     private String readOutput(
@@ -249,7 +280,8 @@ public final class LocalCliModelClient implements ModelClient {
                     } catch (RuntimeException ignored) {
                         // Startup notices and future event variants do not affect progress.
                     }
-                    updateProgress(indicator, statusListener, "本机 Codex · " + stage + " · 事件 " + events);
+                    updateProgress(indicator, statusListener, PluginLanguage.text("本机 Codex · ", "Local Codex · ")
+                            + stage + PluginLanguage.text(" · 事件 ", " · event ") + events);
                 }
             }
             LOG.info("Local Codex event summary: stage=" + stage + ", events=" + events + ", toolCalls=" + toolCalls);
@@ -290,6 +322,7 @@ public final class LocalCliModelClient implements ModelClient {
             Consumer<String> statusListener,
             String message
     ) {
+        message = PluginLanguage.userMessage(message);
         indicator.setText(message);
         statusListener.accept(message);
     }

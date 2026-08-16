@@ -1,5 +1,6 @@
 package com.archscope.jetbrains.git;
 
+import com.archscope.jetbrains.i18n.PluginLanguage;
 import com.archscope.jetbrains.model.EvidencePack;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -17,6 +18,19 @@ import java.util.Set;
 
 public final class CodexWorkspaceService {
     private static final Logger LOG = Logger.getInstance(CodexWorkspaceService.class);
+    private static final int MAX_DIFF_LINE_LENGTH = 20_000;
+    private static final Set<String> CODE_EXTENSIONS = Set.of(
+            "go", "java", "kt", "kts", "groovy", "gradle", "scala", "clj", "cljs",
+            "js", "jsx", "ts", "tsx", "vue", "svelte", "css", "scss", "less",
+            "py", "rb", "php", "rs", "swift", "dart", "lua",
+            "c", "h", "cc", "cpp", "cxx", "hpp", "cs",
+            "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+            "sql", "proto", "graphql", "gql", "tf", "hcl",
+            "json", "yaml", "yml", "toml", "xml", "ini", "conf", "properties", "mod"
+    );
+    private static final Set<String> CODE_FILENAMES = Set.of(
+            "dockerfile", "makefile", "jenkinsfile", "procfile", "build", "workspace"
+    );
 
     public Workspace create(EvidencePack evidence, ProgressIndicator indicator) throws GitCommandException {
         Path root = null;
@@ -27,7 +41,7 @@ public final class CodexWorkspaceService {
             GitCli git = new GitCli(evidence.repositoryRoot());
 
             Path diffDirectory = Files.createDirectories(root.resolve("evidence"));
-            indicator.setText("准备所选提交的聚合差异");
+            indicator.setText(PluginLanguage.text("准备所选提交的聚合差异", "Preparing the combined diff for selected commits"));
             List<String> aggregatePaths = safePaths(evidence.aggregateNameStatus());
             String aggregatePatch = readPatch(
                     git,
@@ -44,7 +58,7 @@ public final class CodexWorkspaceService {
             );
 
             Workspace workspace = new Workspace(root, repository, git, evidence.targetCommit(), evidence.targetManifest());
-            indicator.setText("物化聚合差异涉及的目标源码");
+            indicator.setText(PluginLanguage.text("物化聚合差异涉及的目标源码", "Materializing target source files referenced by the combined diff"));
             workspace.materialize(aggregatePaths, indicator);
 
             LOG.info("Codex workspace prepared: files=" + countFiles(repository)
@@ -66,7 +80,7 @@ public final class CodexWorkspaceService {
             root = Files.createTempDirectory("ai-code-review-domain-");
             Path repository = Files.createDirectories(root.resolve("repository"));
             Files.createDirectories(root.resolve("evidence"));
-            indicator.setText("准备受限业务源码快照");
+            indicator.setText(PluginLanguage.text("准备受限业务源码快照", "Preparing the restricted business source snapshot"));
             return new Workspace(
                     root,
                     repository,
@@ -93,7 +107,34 @@ public final class CodexWorkspaceService {
                 base, target, "--"
         ));
         arguments.addAll(safePaths);
-        return SensitiveTextSanitizer.redact(git.run(indicator, arguments.toArray(String[]::new)));
+        return compactOversizedDiffLines(
+                SensitiveTextSanitizer.redact(git.run(indicator, arguments.toArray(String[]::new)))
+        );
+    }
+
+    static String compactOversizedDiffLines(String patch) {
+        StringBuilder compacted = new StringBuilder(Math.min(patch.length(), 512_000));
+        int cursor = 0;
+        while (cursor < patch.length()) {
+            int newline = patch.indexOf('\n', cursor);
+            int end = newline < 0 ? patch.length() : newline;
+            int contentEnd = end > cursor && patch.charAt(end - 1) == '\r' ? end - 1 : end;
+            int lineLength = contentEnd - cursor;
+            if (lineLength <= MAX_DIFF_LINE_LENGTH) {
+                compacted.append(patch, cursor, newline < 0 ? end : end + 1);
+            } else {
+                char prefix = patch.charAt(cursor);
+                boolean hasDiffPrefix = prefix == '+' || prefix == '-' || prefix == ' ';
+                if (hasDiffPrefix) compacted.append(prefix);
+                compacted.append("[oversized diff line omitted: ")
+                        .append(lineLength - (hasDiffPrefix ? 1 : 0))
+                        .append(" characters]");
+                if (contentEnd != end) compacted.append('\r');
+                if (newline >= 0) compacted.append('\n');
+            }
+            cursor = newline < 0 ? patch.length() : newline + 1;
+        }
+        return compacted.toString();
     }
 
     private List<String> safePaths(String nameStatus) {
@@ -105,13 +146,30 @@ public final class CodexWorkspaceService {
             if (paths.stream().anyMatch(SensitiveTextSanitizer::isSensitivePath)) continue;
             safe.addAll(paths);
         }
-        List<String> focused = safe.stream().filter(path -> !isGeneratedKnowledge(path)).toList();
-        return focused.isEmpty() ? List.copyOf(safe) : focused;
+        return safe.stream().filter(CodexWorkspaceService::isCodeEvidencePath).toList();
     }
 
-    private static boolean isGeneratedKnowledge(String path) {
+    public static boolean isCodeEvidencePath(String path) {
         String normalized = path.replace('\\', '/').toLowerCase(java.util.Locale.ROOT);
-        return normalized.startsWith(".repomind/") || normalized.contains("/.repomind/");
+        if (normalized.startsWith(".repomind/") || normalized.contains("/.repomind/")
+                || normalized.startsWith("openspec/") || normalized.contains("/openspec/")
+                || normalized.startsWith("docs/") || normalized.contains("/docs/")
+                || normalized.startsWith("vendor/") || normalized.contains("/vendor/")
+                || normalized.startsWith("node_modules/") || normalized.contains("/node_modules/")
+                || normalized.startsWith("dist/") || normalized.contains("/dist/")
+                || normalized.startsWith("build/") || normalized.contains("/build/")
+                || normalized.startsWith("coverage/") || normalized.contains("/coverage/")) {
+            return false;
+        }
+        int slash = normalized.lastIndexOf('/');
+        String filename = slash < 0 ? normalized : normalized.substring(slash + 1);
+        if (filename.equals("go.sum") || filename.endsWith(".lock") || filename.endsWith("-lock.json")
+                || filename.endsWith(".min.js") || filename.endsWith(".min.css") || filename.endsWith(".map")) {
+            return false;
+        }
+        if (CODE_FILENAMES.contains(filename) || filename.startsWith("dockerfile.")) return true;
+        int dot = filename.lastIndexOf('.');
+        return dot >= 0 && CODE_EXTENSIONS.contains(filename.substring(dot + 1));
     }
 
     private long countFiles(Path directory) throws IOException {

@@ -13,6 +13,51 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DomainEvidencePlanTest {
     @Test
+    void parsesLanguageIndependentEditIntentAndKeepsEvidenceFreePlansEmpty() throws Exception {
+        EvidencePack evidence = new EvidencePack(
+                Path.of("/repo"), "head", "head", "head", "tree", "fingerprint",
+                List.of(), "", List.of(), List.of("src/chat.go")
+        );
+        DomainEvidencePlan plan = DomainEvidencePlan.parse("""
+                {"schema":"business-domain-evidence-plan/v1",
+                 "refinement_intent":{"operations":["merge_domains","reorder_nodes"],
+                   "target_domain_ids":["review","publish"],"target_step_ids":["notify"],
+                   "requested_topics":[],"evidence_required":false},
+                 "candidate_paths":[],"queries":[]}
+                """, evidence);
+
+        assertTrue(plan.editIntent().has(DomainEvidencePlan.Operation.MERGE_DOMAINS));
+        assertTrue(plan.editIntent().has(DomainEvidencePlan.Operation.REORDER_NODES));
+        assertEquals(List.of("review", "publish"), plan.editIntent().targetDomainIds());
+        assertTrue(plan.candidatePaths().isEmpty());
+        assertTrue(plan.queries().isEmpty());
+    }
+
+    @Test
+    void parsesPlainTextPlanningSlotsWithoutRequiringModelJson() throws Exception {
+        EvidencePack evidence = new EvidencePack(
+                Path.of("/repo"), "head", "head", "head", "tree", "fingerprint",
+                List.of(), "", List.of(), List.of("src/chat.go")
+        );
+        DomainEvidencePlan plan = DomainEvidencePlan.parse("""
+                SCHEMA\tbusiness-domain-evidence-plan/v1
+                TOPIC\tfix review flow
+                OPERATIONS\tcorrect_flow,add_nodes
+                TARGET_FLOW_IDS\treview-flow
+                TARGET_STEP_IDS\treview-result
+                REQUESTED_TOPICS\trejection notice
+                EVIDENCE_REQUIRED\ttrue
+                CANDIDATE_PATH\tsrc/chat.go
+                QUERY\tReviewResult\tstate\tlocate the actual result state
+                """, evidence);
+
+        assertTrue(plan.editIntent().has(DomainEvidencePlan.Operation.CORRECT_FLOW));
+        assertTrue(plan.editIntent().has(DomainEvidencePlan.Operation.ADD_NODES));
+        assertEquals(List.of("review-flow"), plan.editIntent().targetFlowIds());
+        assertEquals(List.of("src/chat.go"), plan.candidatePaths());
+        assertEquals("ReviewResult", plan.queries().get(0).literal());
+    }
+    @Test
     void filtersBroadQueriesAndAddsSymbolsFromCurrentUnknowns() throws Exception {
         EvidencePack evidence = new EvidencePack(
                 Path.of("/repo"), "head", "head", "head", "tree", "fingerprint",

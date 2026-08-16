@@ -53,6 +53,7 @@ public final class ReportArchive {
             metadata.addProperty("repository_root", normalizedRoot.toString());
             metadata.addProperty("focus", request == null ? "" : request.focus());
             metadata.addProperty("mode", request == null ? "" : request.mode().name());
+            metadata.addProperty("output_language", request == null ? "zh-CN" : request.outputLanguage().code());
             metadata.addProperty("target_commit", result.targetCommit());
             metadata.addProperty("fingerprint", result.fingerprint());
             metadata.addProperty("created_at", createdAt.toString());
@@ -72,6 +73,7 @@ public final class ReportArchive {
                 normalizedRoot,
                 request == null ? "" : request.focus(),
                 request == null ? null : request.mode(),
+                request == null ? AnalysisRequest.OutputLanguage.CHINESE : request.outputLanguage(),
                 result.targetCommit(),
                 result.fingerprint(),
                 createdAt,
@@ -122,11 +124,15 @@ public final class ReportArchive {
             ).getAsJsonObject();
             if (!SCHEMA.equals(string(metadata, "schema"))) return null;
             String mode = string(metadata, "mode");
+            String outputLanguage = string(metadata, "output_language");
             return new Entry(
                     string(metadata, "id"),
                     Path.of(string(metadata, "repository_root")).toAbsolutePath().normalize(),
                     string(metadata, "focus"),
                     mode.isBlank() ? null : AnalysisRequest.Mode.valueOf(mode),
+                    "en".equals(outputLanguage)
+                            ? AnalysisRequest.OutputLanguage.ENGLISH
+                            : AnalysisRequest.OutputLanguage.CHINESE,
                     string(metadata, "target_commit"),
                     string(metadata, "fingerprint"),
                     Instant.parse(string(metadata, "created_at")),
@@ -200,6 +206,7 @@ public final class ReportArchive {
             Path repositoryRoot,
             String focus,
             AnalysisRequest.Mode mode,
+            AnalysisRequest.OutputLanguage outputLanguage,
             String targetCommit,
             String fingerprint,
             Instant createdAt,

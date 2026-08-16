@@ -17,7 +17,7 @@ Contract:
   }],
   "new_unknowns":[{"question":"at most one genuinely new atomic gap, normally omit","kind":"entry|origin|rule|state|event|outcome","flow_id":"existing flow id or empty","symbols":["exact identifier"],"why_material":"..."}],
   "next_frontier_queries":[{"question":"exact unresolved question","literal":"new exact caller/callee/table/state identifier visible in this source_evidence","reason":"how following it can answer that question"}],
-  "overview_update":{"purpose":"optional replacement","plain_story":["optional complete 3-7 sentence replacement"],
+  "overview_update":{"purpose":"optional replacement","plain_story":["optional concise ordered sentence replacement"],
     "actors":["optional complete replacement objects"],"domain_relationships":["optional complete replacement objects"],
     "terms":["optional complete replacement objects"],
     "business_object_updates":[{"id":"existing object id","plain_meaning":"optional","storage_kind":"payload|struct|table|event|config|unknown","lifecycle":"optional","field_groups":["optional complete replacement objects"],"supporting_sources":["optional complete replacement source objects"]}]},
@@ -47,7 +47,7 @@ Rules:
 - Treat grouped control-flow evidence as one path: distinguish a state that is explicitly changed, cleaned by defer,
   unchanged because an early return skips later code, and not created because registration occurs later. An application
   log is not a runtime/domain event. Apply step_updates when a resolved unknown changes what a flow step should show.
-- Keep conclusions in concise Simplified Chinese. Do not add speculative flow updates.
+- Keep conclusions concise and use the language required by OUTPUT LANGUAGE. Do not add speculative flow updates.
 - data_origins, data_flow, and consumer_targets are complete-array replacements, never a side-branch patch. Only return
   a field when the replacement preserves the existing producer-to-consumer main chain and adds or corrects evidence; a reward,
   notification, or milestone subflow must not replace the primary data lineage.

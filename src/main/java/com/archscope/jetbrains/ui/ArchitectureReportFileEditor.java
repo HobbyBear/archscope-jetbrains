@@ -3,6 +3,8 @@ package com.archscope.jetbrains.ui;
 import com.archscope.jetbrains.analysis.ArchitectureAnalysisService;
 import com.archscope.jetbrains.analysis.ModelClientRegistry;
 import com.archscope.jetbrains.analysis.ReportArchive;
+import com.archscope.jetbrains.git.GitEvidenceService;
+import com.archscope.jetbrains.model.EvidencePack;
 import com.archscope.jetbrains.model.AnalysisResult;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -75,20 +77,27 @@ final class ArchitectureReportFileEditor extends UserDataHolderBase implements F
                     );
                 }
             }, browser.getCefBrowser());
-            browser.loadHTML(file.reportHtml());
+            browser.loadHTML(editorHtml());
             component.add(browser.getComponent(), BorderLayout.CENTER);
         } else {
             JBTextArea fallback = new JBTextArea(file.getContent().toString());
             fallback.setEditable(false);
             fallback.setFont(JBUI.Fonts.create("Monospaced", 12));
-            component.add(new JBLabel("当前 IDE Runtime 不支持 JCEF，已显示报告 HTML 源码。"), BorderLayout.NORTH);
+            component.add(new JBLabel(PluginText.text("当前 IDE Runtime 不支持 JCEF，已显示报告 HTML 源码。",
+                    "This IDE runtime does not support JCEF. Showing the report HTML source.")), BorderLayout.NORTH);
             component.add(new JBScrollPane(fallback), BorderLayout.CENTER);
         }
     }
 
+    private String editorHtml() {
+        if (file.supportsRefinement()) return file.reportHtml();
+        return file.reportHtml().replace("</head>", "<style>.refine{display:none!important}</style></head>");
+    }
+
     private void startRefinement(Project project, String payload) {
         if (!file.supportsRefinement()) {
-            setRefineState("error", "当前报告缺少可继续分析的会话上下文");
+            setRefineState("error", PluginText.text("当前报告缺少可继续分析的会话上下文",
+                    "This report does not have the session context required for follow-up analysis"));
             return;
         }
         String prompt;
@@ -96,30 +105,35 @@ final class ArchitectureReportFileEditor extends UserDataHolderBase implements F
             JsonObject request = JsonParser.parseString(payload).getAsJsonObject();
             prompt = request.has("prompt") ? request.get("prompt").getAsString().strip() : "";
         } catch (RuntimeException exception) {
-            setRefineState("error", "无法解析补充要求");
+            setRefineState("error", PluginText.text("无法解析补充要求", "Could not parse the follow-up request"));
             return;
         }
         if (prompt.isEmpty()) {
-            setRefineState("error", "请输入需要补充的内容");
+            setRefineState("error", PluginText.text("请输入需要补充的内容", "Enter what should be expanded or corrected"));
             return;
         }
         if (!refining.compareAndSet(false, true)) {
-            setRefineState("working", "已有补充分析正在运行");
+            setRefineState("working", PluginText.text("已有补充分析正在运行", "A follow-up analysis is already running"));
             return;
         }
-        setRefineState("working", "正在理解补充要求");
-        new Task.Backgroundable(project, "补充业务理解报告", true) {
+        setRefineState("working", PluginText.text("正在理解补充要求", "Understanding the follow-up request"));
+        new Task.Backgroundable(project, PluginText.text("补充业务理解报告", "Update business logic report"), true) {
             private AnalysisResult result;
             private String archiveWarning;
 
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
+                    EvidencePack evidence = file.evidence();
+                    if (evidence == null && file.request().isBusinessDomain()) {
+                        evidence = new GitEvidenceService().collectSnapshot(file.request(), indicator);
+                        file.updateEvidence(evidence);
+                    }
                     result = new ArchitectureAnalysisService(
                             ModelClientRegistry.selected(new ModelProviderStore(project).load())
                     ).refine(
                             file.request(),
-                            file.evidence(),
+                            evidence,
                             file.currentResult().reportJson(),
                             prompt,
                             indicator,
@@ -145,8 +159,9 @@ final class ArchitectureReportFileEditor extends UserDataHolderBase implements F
                 if (archiveWarning != null) {
                     Messages.showWarningDialog(
                             project,
-                            "报告已更新，但本地归档失败：" + archiveWarning,
-                            "本地归档失败"
+                            PluginText.text("报告已更新，但本地归档失败：", "The report was updated, but local archiving failed: ")
+                                    + PluginText.userMessage(archiveWarning),
+                            PluginText.text("本地归档失败", "Local archive failed")
                     );
                 }
             }
@@ -156,19 +171,22 @@ final class ArchitectureReportFileEditor extends UserDataHolderBase implements F
                 refining.set(false);
                 Throwable cause = error;
                 while (cause.getCause() != null && cause.getCause() != cause) cause = cause.getCause();
-                setRefineState("error", cause.getMessage() == null ? "补充分析失败" : cause.getMessage());
+                setRefineState("error", cause.getMessage() == null
+                        ? PluginText.text("补充分析失败", "Follow-up analysis failed")
+                        : PluginText.userMessage(cause.getMessage()));
             }
 
             @Override
             public void onCancel() {
                 refining.set(false);
-                setRefineState("error", "已取消补充分析");
+                setRefineState("error", PluginText.text("已取消补充分析", "Follow-up analysis canceled"));
             }
         }.queue();
     }
 
     private void setRefineState(String state, String message) {
         if (browser == null) return;
+        message = PluginText.userMessage(message);
         String script = "window.archscopeSetRefineState&&window.archscopeSetRefineState("
                 + GSON.toJson(state) + "," + GSON.toJson(message) + ");";
         browser.getCefBrowser().executeJavaScript(script, browser.getCefBrowser().getURL(), 0);

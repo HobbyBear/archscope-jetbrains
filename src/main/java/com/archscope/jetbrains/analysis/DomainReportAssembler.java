@@ -5,7 +5,6 @@ import com.archscope.jetbrains.model.EvidencePack;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -18,6 +17,7 @@ public final class DomainReportAssembler {
     private static final String SCHEMA = "closed-business-domain-analysis/v1";
 
     public JsonObject assemble(String raw, AnalysisRequest request, EvidencePack evidence) throws ModelClientException {
+        boolean english = request.outputLanguage().isEnglish();
         JsonObject analysis = parse(raw);
         if (!SCHEMA.equals(string(analysis, "schema"))) {
             throw new ModelClientException("业务分析 schema 无效");
@@ -50,12 +50,11 @@ public final class DomainReportAssembler {
             List<String> flowDomainIds = strings(array(sourceFlow, "domain_ids")).stream()
                     .filter(domains::containsKey).distinct().toList();
             List<JsonObject> steps = objects(array(sourceFlow, "steps"));
-            if (steps.size() < 4) {
-                throw new ModelClientException("业务流程 " + flowId + " 少于 4 个步骤，无法视为完整流程");
-            }
+            if (steps.isEmpty()) continue;
             JsonArray children = new JsonArray();
             List<String> stepNodeIds = new ArrayList<>();
             List<String> stepLaneIds = new ArrayList<>();
+            LinkedHashSet<String> usedDomainIds = new LinkedHashSet<>();
             Map<String, String> reportStepIds = new LinkedHashMap<>();
             List<StepBinding> stepBindings = new ArrayList<>();
             for (int stepIndex = 0; stepIndex < steps.size(); stepIndex++) {
@@ -64,6 +63,7 @@ public final class DomainReportAssembler {
                         ? string(step, "domain_id")
                         : flowDomainIds.stream().findFirst().orElse(domains.keySet().iterator().next());
                 Domain domain = domains.get(domainId);
+                usedDomainIds.add(domainId);
                 String nodeId = "domain-node-" + (flowIndex + 1) + "-" + (stepIndex + 1);
                 String stepId = "domain-step-" + (flowIndex + 1) + "-" + (stepIndex + 1);
                 String sourceStepId = stableId(string(step, "id"), "step-" + (stepIndex + 1));
@@ -74,15 +74,13 @@ public final class DomainReportAssembler {
                 stepBindings.add(new StepBinding(
                         sourceStepId, stepId, file, string(step, "symbol"), line
                 ));
-                String execution = string(step, "execution");
-                if (!Set.of("same_execution", "async_continuation").contains(execution)) {
-                    throw new ModelClientException("业务步骤 " + sourceStepId + " 没有说明与当前触发的执行关系");
-                }
+                String execution = normalizeExecution(string(step, "execution"));
 
                 JsonObject node = new JsonObject();
                 node.addProperty("id", nodeId);
                 node.addProperty("kind", normalizeNodeKind(string(step, "node_kind")));
                 node.addProperty("label", fallback(string(step, "symbol"), string(step, "title")));
+                node.addProperty("symbol", string(step, "symbol"));
                 node.addProperty("service", domain.id());
                 node.addProperty("module", domain.id());
                 node.addProperty("file", file);
@@ -115,7 +113,8 @@ public final class DomainReportAssembler {
                     JsonObject supportingNode = new JsonObject();
                     supportingNode.addProperty("id", supportingId);
                     supportingNode.addProperty("kind", "method");
-                    supportingNode.addProperty("label", fallback(string(supporting, "symbol"), "补充源码"));
+                    supportingNode.addProperty("label", fallback(string(supporting, "symbol"), english ? "Supporting source" : "补充源码"));
+                    supportingNode.addProperty("symbol", string(supporting, "symbol"));
                     supportingNode.addProperty("service", domain.id());
                     supportingNode.addProperty("module", domain.id());
                     supportingNode.addProperty("file", string(supporting, "file"));
@@ -175,7 +174,9 @@ public final class DomainReportAssembler {
                     edge.addProperty("number", String.valueOf(stepIndex));
                     edge.addProperty("kind", normalizeRelation(string(step, "relation_kind")));
                     edge.addProperty("label", fallback(string(step, "relation_label"),
-                            "async_continuation".equals(execution) ? "异步延续到下一步骤" : "进入下一业务步骤"));
+                            "async_continuation".equals(execution)
+                                    ? (english ? "Continue asynchronously to the next step" : "异步延续到下一步骤")
+                                    : (english ? "Continue to the next business step" : "进入下一业务步骤")));
                     edge.addProperty("payload", strings(array(step, "inputs")).stream().findFirst().orElse(""));
                     edge.addProperty("meaning", string(step, "summary"));
                     edge.addProperty("evidence_kind", evidenceKind);
@@ -196,7 +197,8 @@ public final class DomainReportAssembler {
                         contract.addProperty("payload", edge.get("payload").getAsString());
                         contract.addProperty("meaning", edge.get("meaning").getAsString());
                         contract.addProperty("lifecycle", "async_continuation".equals(execution)
-                                ? "由当前触发直接发起的异步延续" : "当前触发的同一次执行内");
+                                ? (english ? "Asynchronous continuation started directly by the current trigger" : "由当前触发直接发起的异步延续")
+                                : (english ? "Within the same execution as the current trigger" : "当前触发的同一次执行内"));
                         contract.add("source_node_ids", stringsJson(stepNodeIds.get(stepIndex - 1), nodeId));
                         contracts.add(contract);
                         children.get(stepIndex - 1).getAsJsonObject().getAsJsonArray("contract_out_ids").add(contractId);
@@ -205,22 +207,21 @@ public final class DomainReportAssembler {
                 }
             }
 
-            String primaryDomainId = flowDomainIds.stream().findFirst().orElse(domains.keySet().iterator().next());
+            String primaryDomainId = usedDomainIds.iterator().next();
             JsonObject flowRoot = new JsonObject();
             flowRoot.addProperty("id", flowId);
             flowRoot.addProperty("flow_scope", "business");
             flowRoot.addProperty("title", string(sourceFlow, "title"));
             flowRoot.addProperty("summary", string(sourceFlow, "summary"));
-            flowRoot.addProperty("flow_type", string(sourceFlow, "flow_type"));
-            flowRoot.addProperty("execution_scope", string(sourceFlow, "execution_scope"));
-            flowRoot.addProperty("actor", string(sourceFlow, "actor"));
-            flowRoot.addProperty("trigger", string(sourceFlow, "trigger"));
-            flowRoot.addProperty("routing_condition", string(sourceFlow, "routing_condition"));
+            flowRoot.addProperty("flow_type", normalizeFlowType(string(sourceFlow, "flow_type")));
+            flowRoot.addProperty("execution_scope", "single_trigger");
+            flowRoot.addProperty("actor", fallback(string(sourceFlow, "actor"), english ? "System" : "系统"));
+            flowRoot.addProperty("trigger", fallback(string(sourceFlow, "trigger"), string(sourceFlow, "title")));
+            flowRoot.addProperty("routing_condition", fallback(string(sourceFlow, "routing_condition"), string(sourceFlow, "trigger")));
             flowRoot.add("preconditions", copy(array(sourceFlow, "preconditions")));
             flowRoot.addProperty("outcome", string(sourceFlow, "outcome"));
             flowRoot.addProperty("end_title", fallback(string(sourceFlow, "end_title"), string(sourceFlow, "outcome")));
-            flowRoot.addProperty("data_subject", string(sourceFlow, "data_subject"));
-            flowRoot.addProperty("primary_origin_id", string(sourceFlow, "primary_origin_id"));
+            flowRoot.addProperty("data_subject", fallback(string(sourceFlow, "data_subject"), string(sourceFlow, "title")));
             JsonObject entrySource = sourceBackedObject(copyObject(sourceFlow, "entry_source"), manifest);
             remapStepReference(entrySource, "step_id", reportStepIds, stepBindings);
             flowRoot.add("entry_source", entrySource);
@@ -228,6 +229,8 @@ public final class DomainReportAssembler {
             flowRoot.add("data_writes", copy(array(sourceFlow, "data_writes")));
             JsonArray origins = sourceBackedItems(array(sourceFlow, "data_origins"), manifest);
             remapStepReferences(origins, "joins_step_id", reportStepIds, stepBindings);
+            String primaryOriginId = normalizePrimaryOrigin(origins, string(sourceFlow, "primary_origin_id"));
+            flowRoot.addProperty("primary_origin_id", primaryOriginId);
             flowRoot.add("data_origins", origins);
             JsonArray dataFlow = sourceBackedItems(array(sourceFlow, "data_flow"), manifest);
             remapStepReferences(dataFlow, "step_id", reportStepIds, stepBindings);
@@ -246,41 +249,60 @@ public final class DomainReportAssembler {
             flowRoot.add("source_node_ids", stringsJson(stepNodeIds));
             flowRoot.add("business_rules", copy(array(sourceFlow, "business_rules")));
             flowGroups.add(flowRoot);
-            for (String domainId : flowDomainIds.isEmpty() ? List.of(primaryDomainId) : flowDomainIds) {
+            for (String domainId : usedDomainIds) {
                 flowIdsByDomain.computeIfAbsent(domainId, ignored -> new LinkedHashSet<>()).add(flowId);
             }
         }
 
+        if (flowGroups.isEmpty()) {
+            throw new ModelClientException("业务分析没有返回包含源码步骤的业务流程");
+        }
         JsonObject report = new JsonObject();
         report.addProperty("schema", "code-architecture-report/v1");
         report.addProperty("source_format", "business-domain-walkthrough/v1");
+        report.addProperty("output_language", request.outputLanguage().code());
         report.addProperty("title", string(analysis, "title"));
         report.addProperty("summary", string(analysis, "summary"));
         JsonObject focus = new JsonObject();
-        focus.addProperty("request", request.focus());
-        focus.addProperty("audience", "首次接触该业务的工程师");
+        focus.addProperty("request", english ? string(analysis, "title") : request.focus());
+        focus.addProperty("audience", english ? "Engineers new to this business domain" : "首次接触该业务的工程师");
         report.add("analysis_focus", focus);
         JsonObject guide = new JsonObject();
         guide.addProperty("title", string(analysis, "title"));
         guide.addProperty("subtitle", string(analysis, "summary"));
-        guide.addProperty("start_here", "先看业务总览，再按业务流程阅读完整路径");
-        guide.addProperty("how_to_read", "业务域说明职责，流程说明职责如何协作完成用户目标");
+        guide.addProperty("start_here", english ? "Start with the business overview, then follow each complete business flow" : "先看业务总览，再按业务流程阅读完整路径");
+        guide.addProperty("how_to_read", english ? "Domains explain stable responsibilities; flows explain how they collaborate to achieve a user goal" : "业务域说明职责，流程说明职责如何协作完成用户目标");
         report.add("reader_guide", guide);
         JsonObject businessOverview = copyObject(analysis, "business_overview");
+        businessOverview.addProperty("purpose", fallback(string(businessOverview, "purpose"), string(analysis, "summary")));
+        ensureArray(businessOverview, "plain_story");
+        ensureArray(businessOverview, "actors");
+        ensureArray(businessOverview, "terms");
+        ensureArray(businessOverview, "domain_relationships");
+        ensureArray(businessOverview, "reading_order");
         JsonArray businessObjects = sourceBackedItems(array(businessOverview, "business_objects"), manifest);
         normalizeBusinessObjectStorageKinds(businessObjects);
         businessOverview.add("business_objects", businessObjects);
+
+        Map<String, LinkedHashSet<String>> resolvedSourceIdsByDomain = new LinkedHashMap<>();
+        for (Domain domain : domains.values()) {
+            LinkedHashSet<String> sourceIds = new LinkedHashSet<>(
+                    sourceIdsByDomain.getOrDefault(domain.id(), new LinkedHashSet<>()));
+            for (String sourceStepId : strings(array(domain.source(), "source_step_ids"))) {
+                sourceIds.addAll(sourceIdsBySourceStep.getOrDefault(sourceStepId, new LinkedHashSet<>()));
+            }
+            if (!sourceIds.isEmpty()) resolvedSourceIdsByDomain.put(domain.id(), sourceIds);
+        }
+        Set<String> boundDomainIds = resolvedSourceIdsByDomain.keySet();
+        normalizeBusinessOverviewDomains(businessOverview, boundDomainIds);
         report.add("business_overview", businessOverview);
 
         JsonArray businessDomains = new JsonArray();
         JsonArray lanes = new JsonArray();
         for (Domain domain : domains.values()) {
+            if (!boundDomainIds.contains(domain.id())) continue;
             JsonObject source = domain.source();
-            LinkedHashSet<String> domainSourceIds = new LinkedHashSet<>(
-                    sourceIdsByDomain.getOrDefault(domain.id(), new LinkedHashSet<>()));
-            for (String sourceStepId : strings(array(source, "source_step_ids"))) {
-                domainSourceIds.addAll(sourceIdsBySourceStep.getOrDefault(sourceStepId, new LinkedHashSet<>()));
-            }
+            LinkedHashSet<String> domainSourceIds = resolvedSourceIdsByDomain.get(domain.id());
             JsonObject item = new JsonObject();
             item.addProperty("id", domain.id());
             item.addProperty("name", string(source, "name"));
@@ -291,7 +313,7 @@ public final class DomainReportAssembler {
             item.add("receives", copy(array(source, "receives")));
             item.add("produces", copy(array(source, "produces")));
             item.add("not_responsible", copy(array(source, "not_responsible")));
-            item.add("depends_on", filteredStrings(array(source, "depends_on"), domains.keySet()));
+            item.add("depends_on", filteredStrings(array(source, "depends_on"), boundDomainIds));
             item.add("flow_ids", stringsJson(flowIdsByDomain.getOrDefault(domain.id(), new LinkedHashSet<>())));
             item.add("source_node_ids", stringsJson(domainSourceIds));
             businessDomains.add(item);
@@ -312,8 +334,8 @@ public final class DomainReportAssembler {
         report.add("business_domains", businessDomains);
         JsonObject design = new JsonObject();
         JsonArray principles = new JsonArray();
-        principles.add("业务域表示稳定职责，完整流程表示职责间协作。");
-        principles.add("无法由源码证实的关系保留在待确认项中。");
+        principles.add(english ? "Business domains represent stable responsibilities; complete flows represent collaboration between them." : "业务域表示稳定职责，完整流程表示职责间协作。");
+        principles.add(english ? "Relationships not proven by source evidence remain in the open questions." : "无法由源码证实的关系保留在待确认项中。");
         design.add("principles", principles);
         design.add("lanes", lanes);
         design.add("contracts", contracts);
@@ -373,7 +395,7 @@ public final class DomainReportAssembler {
                 int last = stripped.lastIndexOf("```");
                 if (first >= 0 && last > first) stripped = stripped.substring(first + 1, last).strip();
             }
-            return JsonParser.parseString(stripped).getAsJsonObject();
+            return ModelJsonParser.parseObject(stripped);
         } catch (RuntimeException exception) {
             throw new ModelClientException("模型没有返回合法的业务分析 JSON：" + exception.getMessage(), exception);
         }
@@ -455,6 +477,54 @@ public final class DomainReportAssembler {
         return result;
     }
 
+    private String normalizePrimaryOrigin(JsonArray origins, String requestedId) {
+        JsonObject selected = null;
+        for (JsonElement element : origins) {
+            if (!element.isJsonObject()) continue;
+            JsonObject origin = element.getAsJsonObject();
+            if (!requestedId.isBlank() && requestedId.equals(string(origin, "id"))) {
+                selected = origin;
+                break;
+            }
+        }
+        if (selected == null) {
+            for (JsonElement element : origins) {
+                if (element.isJsonObject() && "primary".equals(string(element.getAsJsonObject(), "role"))) {
+                    selected = element.getAsJsonObject();
+                    break;
+                }
+            }
+        }
+        if (selected == null) return requestedId;
+        for (JsonElement element : origins) {
+            if (!element.isJsonObject()) continue;
+            JsonObject origin = element.getAsJsonObject();
+            if (origin == selected) {
+                origin.addProperty("role", "primary");
+            } else if ("primary".equals(string(origin, "role"))) {
+                origin.addProperty("role", "lookup");
+            }
+        }
+        return string(selected, "id");
+    }
+
+    private void normalizeBusinessOverviewDomains(JsonObject overview, Set<String> domainIds) {
+        overview.add("reading_order", filteredStrings(array(overview, "reading_order"), domainIds));
+        JsonArray relationships = new JsonArray();
+        JsonArray sourceRelationships = array(overview, "domain_relationships");
+        if (sourceRelationships != null) {
+            for (JsonElement element : sourceRelationships) {
+                if (!element.isJsonObject()) continue;
+                JsonObject relationship = element.getAsJsonObject();
+                if (domainIds.contains(string(relationship, "source"))
+                        && domainIds.contains(string(relationship, "target"))) {
+                    relationships.add(relationship.deepCopy());
+                }
+            }
+        }
+        overview.add("domain_relationships", relationships);
+    }
+
     private void normalizeBusinessObjectStorageKinds(JsonArray businessObjects) {
         Set<String> allowed = Set.of("payload", "struct", "table", "event", "config", "unknown");
         for (JsonElement element : businessObjects) {
@@ -486,6 +556,10 @@ public final class DomainReportAssembler {
 
     private JsonObject copyObject(JsonObject owner, String name) {
         return owner.has(name) && owner.get(name).isJsonObject() ? owner.getAsJsonObject(name).deepCopy() : new JsonObject();
+    }
+
+    private void ensureArray(JsonObject owner, String name) {
+        if (!owner.has(name) || !owner.get(name).isJsonArray()) owner.add(name, new JsonArray());
     }
 
     private JsonArray copy(JsonArray values) {
@@ -577,6 +651,14 @@ public final class DomainReportAssembler {
 
     private String normalizeFlowKind(String value) {
         return Set.of("stage", "decision", "success", "failure").contains(value) ? value : "stage";
+    }
+
+    private String normalizeExecution(String value) {
+        return "async_continuation".equals(value) ? value : "same_execution";
+    }
+
+    private String normalizeFlowType(String value) {
+        return Set.of("request", "job", "event", "command").contains(value) ? value : "request";
     }
 
     private String normalizeRelation(String value) {

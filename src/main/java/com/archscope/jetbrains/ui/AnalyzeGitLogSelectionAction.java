@@ -35,14 +35,17 @@ public final class AnalyzeGitLogSelectionAction extends DumbAwareAction {
         if (selected.size() > MAX_COMMITS) {
             Messages.showWarningDialog(
                     project,
-                    "一次最多分析 " + MAX_COMMITS + " 个提交，请缩小选择范围。",
-                    "选择的提交过多"
+                    PluginText.text("一次最多分析 " + MAX_COMMITS + " 个提交，请缩小选择范围。",
+                            "At most " + MAX_COMMITS + " commits can be analyzed at once. Narrow the selection."),
+                    PluginText.text("选择的提交过多", "Too many commits selected")
             );
             return;
         }
         String rootPath = selected.get(0).getRoot().getPath();
         if (selected.stream().anyMatch(commit -> !rootPath.equals(commit.getRoot().getPath()))) {
-            Messages.showWarningDialog(project, "请选择同一个 Git 仓库中的提交。", "无法跨仓库分析");
+            Messages.showWarningDialog(project,
+                    PluginText.text("请选择同一个 Git 仓库中的提交。", "Select commits from the same Git repository."),
+                    PluginText.text("无法跨仓库分析", "Cannot analyze across repositories"));
             return;
         }
 
@@ -77,9 +80,11 @@ public final class AnalyzeGitLogSelectionAction extends DumbAwareAction {
                 && sameRoot;
         event.getPresentation().setEnabledAndVisible(enabled);
         if (commits.size() > 1) {
-            event.getPresentation().setText("AI 分析选中的 " + commits.size() + " 个提交");
+            event.getPresentation().setText(PluginText.text(
+                    "AI 分析选中的 " + commits.size() + " 个提交",
+                    "Analyze " + commits.size() + " Selected Commits with AI"));
         } else {
-            event.getPresentation().setText("AI 分析此提交");
+            event.getPresentation().setText(PluginText.text("AI 分析此提交", "Analyze This Commit with AI"));
         }
     }
 

@@ -24,13 +24,14 @@ final class DomainReportAssemblerTest {
                  "business_overview":{"purpose":"完成聊天","primary_actor":"用户",
                    "plain_story":["用户发送问题。","系统校验后生成回答。","回答通过连接返回给用户。"],
                    "actors":[{"name":"用户","goal":"得到回复","enters_via":"WebSocket"}],
-                   "domain_relationships":[{"source":"entry","target":"runtime","meaning":"提交请求"}],
+                   "domain_relationships":[{"source":"entry","target":"runtime","meaning":"提交请求"},{"source":"common","target":"runtime","meaning":"共享定义"}],
                    "terms":[{"term":"会话","plain_meaning":"连续对话","why_it_matters":"保留上下文"}],
                    "business_objects":[{"id":"message","name":"聊天消息","plain_meaning":"客户端传入的用户问题及系统回答","storage_kind":"unknown","lifecycle":"作为请求载荷从连接进入，生成回答后返回","field_groups":[{"name":"内容","role":"content","fields":["question -> answer"],"meaning":"一次问答的正文"}],"file":"src/chat.go","line":1,"symbol":"accept","evidence":"direct_source","confidence":"high"}],
-                   "reading_order":["entry","runtime"]},
+                   "reading_order":["entry","common","runtime"]},
                  "domains":[
                    {"id":"entry","name":"接入","purpose":"接收请求","why_here":"拥有连接边界","actors":["用户"],"owns":["入口"],"receives":["用户问题"],"produces":["已校验问题"],"not_responsible":["回答生成"],"depends_on":["runtime"],"source_step_ids":["s1","s2"]},
-                   {"id":"runtime","name":"生成","purpose":"生成回复","why_here":"拥有生成边界","actors":["用户"],"owns":["模型调用"],"receives":["已校验问题"],"produces":["回答"],"not_responsible":["连接管理"],"depends_on":[],"source_step_ids":["s3"]}],
+                   {"id":"runtime","name":"生成","purpose":"生成回复","why_here":"拥有生成边界","actors":["用户"],"owns":["模型调用"],"receives":["已校验问题"],"produces":["回答"],"not_responsible":["连接管理"],"depends_on":[],"source_step_ids":["s3"]},
+                   {"id":"common","name":"共享定义","purpose":"提供公共类型","why_here":"模型候选域","actors":["系统"],"owns":["类型"],"receives":["定义"],"produces":["定义"],"not_responsible":[],"depends_on":[],"source_step_ids":[]}],
                  "flows":[{"id":"chat-flow","domain_ids":["entry","runtime"],"title":"发送并回复","summary":"完整聊天",
                    "flow_type":"request","execution_scope":"single_trigger",
                    "actor":"用户","trigger":"发送消息","routing_condition":"WebSocket 收到聊天消息","preconditions":["连接可用"],"outcome":"看到回复","end_title":"回复完成",
@@ -50,10 +51,20 @@ final class DomainReportAssemblerTest {
                  "unknowns":[{"question":"source_evidence 未展示上游生产者","kind":"origin","flow_id":"chat-flow","symbols":["accept"],"why_material":"无法确认问题进入客户端前的生产者"}],"revision_history":[]}
                 """;
 
-        JsonObject report = new DomainReportAssembler().assemble(compact, request, evidence);
+        JsonObject compactJson = com.google.gson.JsonParser.parseString(compact).getAsJsonObject();
+        JsonObject duplicatePrimary = compactJson.getAsJsonArray("flows").get(0).getAsJsonObject()
+                .getAsJsonArray("data_origins").get(0).getAsJsonObject().deepCopy();
+        duplicatePrimary.addProperty("id", "history-origin");
+        duplicatePrimary.addProperty("role", "primary");
+        compactJson.getAsJsonArray("flows").get(0).getAsJsonObject()
+                .getAsJsonArray("data_origins").add(duplicatePrimary);
+
+        JsonObject report = new DomainReportAssembler().assemble(compactJson.toString(), request, evidence);
 
         assertEquals("business-domain-walkthrough/v1", report.get("source_format").getAsString());
         assertEquals(2, report.getAsJsonArray("business_domains").size());
+        assertEquals(2, report.getAsJsonObject("business_overview").getAsJsonArray("reading_order").size());
+        assertEquals(1, report.getAsJsonObject("business_overview").getAsJsonArray("domain_relationships").size());
         assertEquals(5, report.getAsJsonArray("nodes").size());
         assertEquals(3, report.getAsJsonArray("edges").size());
         assertTrue(report.getAsJsonObject("architecture_design").getAsJsonArray("contracts").size() >= 1);
@@ -65,6 +76,9 @@ final class DomainReportAssemblerTest {
         assertEquals("WebSocket客户端", report.getAsJsonObject("flow_map").getAsJsonArray("children")
                 .get(0).getAsJsonObject().getAsJsonArray("data_origins").get(0).getAsJsonObject()
                 .get("source").getAsString());
+        assertEquals("lookup", report.getAsJsonObject("flow_map").getAsJsonArray("children")
+                .get(0).getAsJsonObject().getAsJsonArray("data_origins").get(1).getAsJsonObject()
+                .get("role").getAsString());
         assertEquals("domain-step-1-1", report.getAsJsonObject("flow_map").getAsJsonArray("children")
                 .get(0).getAsJsonObject().getAsJsonArray("data_origins").get(0).getAsJsonObject()
                 .get("joins_step_id").getAsString());

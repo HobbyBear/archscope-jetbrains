@@ -17,12 +17,15 @@ natural-language topic such as "分析聊天逻辑", then keep refining the gene
 - Resolve the baseline and final snapshot from Git ancestry, never author timestamps.
 - Combine a continuous multi-commit selection into one net `base..target` change while retaining per-commit attribution.
 - Materialize only changed target files and the exact caller/outcome evidence requested for unresolved explanation gaps.
-- Keep generated `.repomind` knowledge in coverage statistics but omit its duplicate patch text when runtime or specification changes exist.
+- Build analysis prompts only from executable source, tests, schemas, migrations, runtime configuration, and dependency manifests; exclude documentation, design notes, reports, generated knowledge, embedded page assets, lock files, vendored code, and build output locally.
 - Analyze bounded changes in one closed-evidence model turn; use planning plus targeted evidence expansion only for larger changes.
 - Cache validated reports by the locked analysis fingerprint so an identical selection reopens without another model request.
 - Plan business-topic evidence from a locked path index, then run precise local Git searches and provide the complete
   enclosing function scopes as redacted, line-numbered evidence. Exact hits are grouped by file so distant setup, early
   returns, deferred cleanup, settlement, and event calls can be evaluated as one control-flow path.
+- Build business-report schemas, stable IDs, source references, and relationships in plugin code. The synthesis model
+  fills optional `SLOT_NAME<TAB>text` prose only; missing, truncated, or unstructured prose falls back locally instead of
+  triggering whole-report JSON repair rounds.
 - Use two closed-evidence provider turns: change grouping, then concise entry/change/outcome analysis with no autonomous repository search.
 - Deterministically assemble and validate the complete versioned report JSON without a plugin API client or plugin-managed credentials.
 - Validate commit, file, node, lane, contract, flow, and evidence references locally.
@@ -49,7 +52,7 @@ For a selected-change report, the plugin:
 2. Verifies that multiple selections form one continuous first-parent chain, then creates a single aggregate diff from
    the parent of the oldest selected commit to the selected chain tip. Current staged, unstaged, and untracked changes are not included.
 3. Excludes sensitive paths such as `.env`, private keys, keystores, and secret directories before Codex starts.
-4. Writes one aggregate redacted diff; commit/path metadata retains attribution without resending duplicate per-commit patches.
+4. Writes one filtered aggregate code diff; the same code-only scope is applied to aggregate and per-commit path metadata, while commit attribution remains intact without resending duplicate patches.
 5. Runs ephemeral closed-evidence provider turns without changing the configured model, provider, proxy, approval, sandbox,
    MCP, skills, or project instructions. The plugin bounds reasoning effort to `medium` for report synthesis and `low`
    for scope planning so deterministic JSON work does not inherit an unnecessarily expensive global setting.
@@ -103,7 +106,7 @@ Language-specific PSI support can be added as optional enhancements. Git snapsho
 - The plugin itself does not checkout, fetch, merge, commit, or push.
 - Sensitive paths such as `.env`, private keys, keystores, and secret directories are excluded before patch content is read.
 - Common secret shapes are redacted as a second layer.
-- The selected provider receives redacted Git patches or bounded source snippets from a locked commit, never untracked files.
+- The selected provider receives filtered, redacted code patches or bounded source snippets from a locked commit, never untracked files or excluded non-code artifacts.
 - Provider runtime behavior and credentials remain owned by the selected adapter.
 - The model cannot produce a displayable report unless local reference validation passes.
 - API credentials, provider settings, and proxy settings remain owned by the selected local CLI.

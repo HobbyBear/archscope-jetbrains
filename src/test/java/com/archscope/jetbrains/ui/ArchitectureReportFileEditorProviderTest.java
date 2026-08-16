@@ -1,6 +1,7 @@
 package com.archscope.jetbrains.ui;
 
 import com.archscope.jetbrains.model.AnalysisResult;
+import com.archscope.jetbrains.model.AnalysisRequest;
 import com.intellij.openapi.fileEditor.FileEditorPolicy;
 import com.intellij.openapi.project.Project;
 import com.intellij.testFramework.LightVirtualFile;
@@ -36,5 +37,16 @@ final class ArchitectureReportFileEditorProviderTest {
         assertEquals("<html><body>report</body></html>", report.reportHtml());
         assertEquals(Path.of("/repo"), report.repositoryRoot());
         assertFalse(report.isWritable());
+    }
+
+    @Test
+    void archivedBusinessReportCanRecollectEvidenceForRefinement() {
+        AnalysisResult result = new AnalysisResult("{}", "<html></html>", "fingerprint", "0123456789abcdef");
+        AnalysisRequest request = AnalysisRequest.businessDomain(Path.of("/repo"), "分析聊天");
+
+        ArchitectureReportVirtualFile report = new ArchitectureReportVirtualFile(
+                result, Path.of("/repo"), request, null);
+
+        assertTrue(report.supportsRefinement());
     }
 }

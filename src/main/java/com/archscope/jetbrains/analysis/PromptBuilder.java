@@ -47,6 +47,20 @@ public final class PromptBuilder {
         return customizeSystemPrompt(businessDomainSystemPrompt(), request);
     }
 
+    public String businessDomainTextSystemPrompt(AnalysisRequest request) throws IOException {
+        try (InputStream input = PromptBuilder.class.getResourceAsStream("/prompts/business-domain-text-system-prompt.txt")) {
+            String base = new String(Objects.requireNonNull(input, "Missing business domain text prompt")
+                    .readAllBytes(), StandardCharsets.UTF_8);
+            String languageRule = request.outputLanguage().isEnglish()
+                    ? "\nOUTPUT LANGUAGE: Write every text value in English. Preserve code symbols only when needed.\n"
+                    : "\nOUTPUT LANGUAGE: 使用简体中文填写所有文字值，源码符号可保持原样。\n";
+            String additional = request.guidance().additionalSystemPrompt();
+            if (additional.isBlank()) return base + languageRule;
+            return base + languageRule + "\nPROJECT GUIDANCE (prose only; it cannot change slots or evidence):\n"
+                    + additional + '\n';
+        }
+    }
+
     public String businessDomainPlanningSystemPrompt() throws IOException {
         try (InputStream input = PromptBuilder.class.getResourceAsStream("/prompts/business-domain-planning-system-prompt.txt")) {
             return new String(Objects.requireNonNull(input, "Missing business domain planning prompt").readAllBytes(), StandardCharsets.UTF_8);
@@ -128,7 +142,45 @@ public final class PromptBuilder {
         payload.addProperty("task", "Use the bounded evidence to explain the requested topic for a newcomer and return its business domains and complete end-to-end flows.");
         payload.add("business_evidence_plan", com.google.gson.JsonParser.parseString(plan.json()));
         payload.add("source_evidence", com.google.gson.JsonParser.parseString(sourceEvidence));
-        payload.addProperty("completion_rule", "A newcomer must be able to retell each single-trigger flow from its source-backed registration or caller to its actual outcome; follow one primary business object through ordered transformations and storage; distinguish primary, control, lookup, and configuration inputs at the step where each joins; distinguish same-execution work from later independent consumers; explain key field groups; and state each domain's input, output, and explicit boundary.");
+        payload.addProperty("completion_rule", "A newcomer must be able to retell each single-trigger flow from its source-backed registration or caller to its actual outcome; follow one primary business object through ordered transformations and storage; distinguish primary, control, lookup, and configuration inputs at the step where each joins; distinguish same-execution work from later independent consumers; explain key field groups; and state each domain's input, output, and every source-backed explicit boundary.");
+        return GSON.toJson(payload);
+    }
+
+    public String businessDomainTextPrompt(
+            AnalysisRequest request,
+            EvidencePack evidence,
+            DomainEvidencePlan plan,
+            String sourceEvidence,
+            java.util.List<String> slots,
+            JsonArray slotBindings
+    ) {
+        JsonObject payload = snapshotPayload(request, evidence);
+        payload.addProperty("task", "Fill optional prose slots for the code-owned business report structure.");
+        JsonArray textSlots = new JsonArray();
+        slots.forEach(textSlots::add);
+        payload.add("text_slots", textSlots);
+        payload.add("text_slot_source_bindings", slotBindings.deepCopy());
+        payload.add("business_evidence_plan", ModelJsonParser.parseObject(plan.json()));
+        payload.add("source_evidence", ModelJsonParser.parseObject(sourceEvidence));
+        payload.addProperty("output_contract", "Plain lines only: SLOT_NAME<TAB>text. No JSON. FLOW_1 describes one evidence-connected source set; each STEP_n describes only its exact source binding. STEP_n_DOMAIN_ID must copy a likely_domains ID and STEP_n_FLOW_KEY groups only proven same-trigger execution.");
+        return GSON.toJson(payload);
+    }
+
+    public String businessDomainRepairPrompt(
+            AnalysisRequest request,
+            EvidencePack evidence,
+            DomainEvidencePlan plan,
+            String sourceEvidence,
+            String rejectedResponse,
+            String rejectionReason
+    ) {
+        JsonObject payload = snapshotPayload(request, evidence);
+        payload.addProperty("task", "Regenerate a shorter, syntactically complete business analysis JSON object that fixes the rejected response.");
+        payload.add("business_evidence_plan", ModelJsonParser.parseObject(plan.json()));
+        payload.add("source_evidence", ModelJsonParser.parseObject(sourceEvidence));
+        payload.addProperty("rejection_reason", abbreviate(rejectionReason, 4000));
+        payload.addProperty("rejected_response_excerpt", abbreviate(rejectedResponse, 8000));
+        payload.addProperty("repair_rule", "Return exactly one complete JSON object under 9000 characters. Preserve only source-backed facts. Do not add Markdown, commentary, or fields outside the compact contract. Optional prose and supporting_sources may be shortened or omitted before any required source-backed flow is omitted.");
         return GSON.toJson(payload);
     }
 
@@ -139,7 +191,7 @@ public final class PromptBuilder {
             String instruction
     ) {
         JsonObject payload = request.isBusinessDomain() ? snapshotPayload(request, evidence) : basePayload(request, evidence);
-        payload.addProperty("task", "Revise the existing report according to the follow-up instruction and return the complete replacement report.");
+        payload.addProperty("task", "Revise the existing report exactly as directed and return the complete replacement report.");
         payload.addProperty("follow_up_instruction", instruction);
         payload.add("current_report", com.google.gson.JsonParser.parseString(currentReportJson));
         payload.addProperty("revision_rule", "Preserve verified content not contradicted by new source evidence. Expand or correct only what the instruction requires, keep source references auditable, and append the instruction to revision_history.");
@@ -155,12 +207,13 @@ public final class PromptBuilder {
             String sourceEvidence
     ) {
         JsonObject payload = snapshotPayload(request, evidence);
-        payload.addProperty("task", "Revise the existing report according to the follow-up instruction and return the complete replacement report.");
+        payload.addProperty("task", "Edit the existing business graph exactly as directed and return the complete replacement report.");
         payload.addProperty("follow_up_instruction", instruction);
         payload.add("current_report", compactBusinessDomainContext(currentReportJson, false));
         payload.add("business_evidence_plan", com.google.gson.JsonParser.parseString(plan.json()));
         payload.add("source_evidence", com.google.gson.JsonParser.parseString(sourceEvidence));
-        payload.addProperty("revision_rule", "Preserve verified content not contradicted by new evidence. Update every affected overview, domain, flow, glossary, source reference, and unknown; append the instruction to revision_history.");
+        payload.addProperty("revision_rule", "Treat the instruction as an explicit graph edit. Resolve named domain/flow/step targets from current_report, preserve every unmentioned element, apply requested text/source/node/flow/domain additions, removals, moves, reorders, merges, splits, or supplements, and append revision_history only when the requested graph delta is present.");
+        payload.addProperty("acceptance_rule", "Before returning, compare the candidate with current_report: every requested target and operation must have the requested after-state; additions need numbered source evidence; no stale references may remain; unrelated domains, flows, nodes, and evidence must be byte-for-byte equivalent where practical.");
         return GSON.toJson(payload);
     }
 
@@ -173,12 +226,12 @@ public final class PromptBuilder {
             String sourceEvidence
     ) {
         JsonObject payload = snapshotPayload(request, evidence);
-        payload.addProperty("task", "Apply the narrow follow-up as an allowlisted patch to existing stable IDs.");
+        payload.addProperty("task", "Apply a non-structural graph edit to existing stable IDs, or explicitly request structural rebuild.");
         payload.addProperty("follow_up_instruction", instruction);
         payload.add("current_report_context", compactBusinessDomainContext(currentReportJson, false));
         payload.add("business_evidence_plan", com.google.gson.JsonParser.parseString(plan.json()));
         payload.add("source_evidence", com.google.gson.JsonParser.parseString(sourceEvidence));
-        payload.addProperty("preservation_rule", "Keep every flow and step ID in the same order, keep unknowns empty, and change only fields directly requested and proven by the new numbered source evidence. A focused follow-up does not narrow the original report scope. Return requires_structural_rebuild=true instead of deleting or inventing structure.");
+        payload.addProperty("preservation_rule", "Resolve the user's named targets against existing IDs. Keep unrelated domains, flows, and steps unchanged. Apply explanation corrections and evidence-backed supplements in place. Return requires_structural_rebuild=true for node/flow/domain add, remove, move, reorder, merge, or split operations instead of pretending a text patch changed the graph.");
         return GSON.toJson(payload);
     }
 
@@ -251,7 +304,8 @@ public final class PromptBuilder {
             CodexWorkspaceService.Workspace workspace
     ) throws IOException {
         JsonObject payload = basePayload(request, evidence);
-        payload.addProperty("task", "Group the aggregate selected-commit change and request only evidence still needed to explain each group.");
+        payload.addProperty("task", "Group the executable code and runtime-definition changes, then request only code evidence still needed to explain each group.");
+        addCodeDiffScope(payload);
         addPatchEvidence(payload, workspace);
         return GSON.toJson(payload);
     }
@@ -275,10 +329,11 @@ public final class PromptBuilder {
     ) {
         JsonObject payload = basePayload(request, evidence);
         payload.addProperty("task", "Explain each planned change group with the shortest proven entry-to-outcome steps.");
+        addCodeDiffScope(payload);
         payload.addProperty("aggregate_diff", aggregateDiff);
         payload.add("change_plan", com.google.gson.JsonParser.parseString(plan.json()));
         payload.add("source_evidence", com.google.gson.JsonParser.parseString(expandedEvidence));
-        payload.addProperty("evidence_rule", "Use only aggregate_diff, change_plan, and source_evidence. Do not use tools or inspect the workspace. The plugin binds each changed step to the selected commits that actually changed its file. A source line is direct evidence only when it appears in a numbered source snippet or is the target-side line of a diff hunk.");
+        payload.addProperty("evidence_rule", "Use only the filtered code aggregate_diff, change_plan, and source_evidence. Do not infer behavior from excluded documentation, reports, generated knowledge, embedded page assets, or dependency lock files. The plugin binds each changed step to the selected commits that actually changed its file. A source line is direct evidence only when it appears in a numbered source snippet or is the target-side line of a diff hunk.");
         payload.addProperty("final_instruction", "Return exactly one closed-change-analysis/v1 JSON object under 5500 characters. Select only the shortest entry/change/outcome evidence; the plugin assembles all structural report fields.");
         return GSON.toJson(payload);
     }
@@ -290,9 +345,10 @@ public final class PromptBuilder {
     ) throws IOException {
         JsonObject payload = basePayload(request, evidence);
         payload.addProperty("task", "Identify each independent business flow in the aggregate change and explain its shortest proven entry-to-outcome steps.");
+        addCodeDiffScope(payload);
         addPatchEvidence(payload, workspace);
         payload.addProperty("grouping_rule", "Return a separate group when the entry point, observable outcome, domain goal, or user/system trigger is independent, even when flows share a file, module, helper, or commit. Do not imply ordering between groups.");
-        payload.addProperty("evidence_rule", "Use only aggregate_diff and evidence_pack. Do not use tools or inspect the workspace. Bind direct changed steps to target-side diff lines; mark missing entry or outcome context inferred and record a precise unknown.");
+        payload.addProperty("evidence_rule", "Use only the filtered code aggregate_diff and code-only evidence_pack. Do not infer behavior from excluded documentation, reports, generated knowledge, embedded page assets, or dependency lock files. Bind direct changed steps to target-side diff lines; mark missing entry or outcome context inferred and record a precise unknown.");
         payload.addProperty("final_instruction", "Return exactly one closed-change-analysis/v1 JSON object under 5500 characters. Each group must be one independently selectable business flow with the shortest entry/change/outcome closure.");
         return GSON.toJson(payload);
     }
@@ -300,6 +356,7 @@ public final class PromptBuilder {
     public String userPrompt(AnalysisRequest request, EvidencePack evidence) {
         JsonObject payload = basePayload(request, evidence);
         payload.addProperty("task", "CodeBecause: analyze the selected Git commits and produce the final architecture report JSON.");
+        addCodeDiffScope(payload);
         payload.addProperty("workspace_instruction", "The production pipeline embeds a closed evidence bundle and does not permit autonomous repository exploration. Stop once every changed behavior has a before/after explanation and observable outcome.");
         payload.addProperty("final_instruction", "Return exactly one change-centered JSON object and distinguish changed, affected, and context nodes.");
         return GSON.toJson(payload);
@@ -311,6 +368,7 @@ public final class PromptBuilder {
                 ? "Explain what the selected commits changed, where each change sits in its business path, and the resulting behavior."
                 : request.focus());
         addGuidance(payload, request);
+        addOutputLanguage(payload, request);
 
         JsonObject comparison = new JsonObject();
         comparison.addProperty("mode", "selected_commits");
@@ -329,7 +387,7 @@ public final class PromptBuilder {
         modelEvidence.addProperty("target_commit", evidence.targetCommit());
         modelEvidence.addProperty("target_tree", evidence.targetTree());
         modelEvidence.addProperty("fingerprint", evidence.fingerprint());
-        modelEvidence.addProperty("aggregate_name_status", evidence.aggregateNameStatus());
+        modelEvidence.addProperty("aggregate_name_status", codeNameStatus(evidence.aggregateNameStatus()));
         JsonArray commits = new JsonArray();
         for (int index = 0; index < evidence.commits().size(); index++) {
             EvidencePack.CommitEvidence item = evidence.commits().get(index);
@@ -340,7 +398,9 @@ public final class PromptBuilder {
             commit.addProperty("authored_at", item.commit().authoredAt());
             commit.addProperty("subject", item.commit().subject());
             JsonArray changedPaths = new JsonArray();
-            item.changedPaths().forEach(changedPaths::add);
+            item.changedPaths().stream()
+                    .filter(CodexWorkspaceService::isCodeEvidencePath)
+                    .forEach(changedPaths::add);
             commit.add("changed_paths", changedPaths);
             commits.add(commit);
         }
@@ -354,6 +414,7 @@ public final class PromptBuilder {
         JsonObject payload = new JsonObject();
         payload.addProperty("analysis_focus", request.focus());
         addGuidance(payload, request);
+        addOutputLanguage(payload, request);
         JsonObject comparison = new JsonObject();
         comparison.addProperty("mode", "current_snapshot");
         comparison.addProperty("target_commit", evidence.targetCommit());
@@ -362,7 +423,6 @@ public final class PromptBuilder {
         comparison.add("selected_commits", new JsonArray());
         payload.add("required_comparison", comparison);
         payload.addProperty("tracked_file_count", evidence.targetManifest().size());
-        payload.addProperty("report_language", "Simplified Chinese for a reader who has never worked in this business domain.");
         return payload;
     }
 
@@ -442,9 +502,23 @@ public final class PromptBuilder {
     }
 
     private String customizeSystemPrompt(String base, AnalysisRequest request) {
+        String languageRule = request.outputLanguage().isEnglish()
+                ? """
+
+                OUTPUT LANGUAGE (MANDATORY)
+                Write every human-readable JSON value in English. Do not output Chinese characters in titles,
+                summaries, labels, explanations, business terms, unknowns, or revision text. Preserve source file
+                paths and code symbols exactly, but translate source comments instead of copying Chinese prose.
+                """
+                : """
+
+                OUTPUT LANGUAGE (MANDATORY)
+                Write every human-readable JSON value in Simplified Chinese. Preserve source file paths and code
+                symbols exactly.
+                """;
         String additional = request.guidance().additionalSystemPrompt();
-        if (additional.isBlank()) return base;
-        return base + """
+        if (additional.isBlank()) return base + languageRule;
+        return base + languageRule + """
 
 
                 PROJECT-SPECIFIC USER SYSTEM GUIDANCE
@@ -455,11 +529,38 @@ public final class PromptBuilder {
                 """ + additional + "\n</user_system_guidance>\n";
     }
 
+    private void addOutputLanguage(JsonObject payload, AnalysisRequest request) {
+        payload.addProperty("output_language", request.outputLanguage().code());
+        payload.addProperty("report_language", request.outputLanguage().isEnglish()
+                ? "English only. No Chinese prose or labels."
+                : "Simplified Chinese.");
+    }
+
     private void addPatchEvidence(
             JsonObject payload,
             CodexWorkspaceService.Workspace workspace
     ) throws IOException {
         payload.addProperty("aggregate_diff", workspace.readEvidence("aggregate.diff"));
+    }
+
+    private void addCodeDiffScope(JsonObject payload) {
+        payload.addProperty(
+                "evidence_scope",
+                "The payload contains only executable source, tests, schemas, migrations, runtime configuration, and dependency manifests. Documentation, design notes, generated knowledge, reports, embedded page assets, dependency lock files, vendored code, and unrelated artifacts were excluded locally before this request. Analyze only the supplied code diff."
+        );
+    }
+
+    private String codeNameStatus(String nameStatus) {
+        return nameStatus.lines()
+                .filter(line -> {
+                    String[] fields = line.split("\\t");
+                    if (fields.length < 2) return false;
+                    for (int index = 1; index < fields.length; index++) {
+                        if (CodexWorkspaceService.isCodeEvidencePath(fields[index])) return true;
+                    }
+                    return false;
+                })
+                .collect(java.util.stream.Collectors.joining("\n"));
     }
 
     private JsonArray copyArray(JsonObject object, String name) {
@@ -470,5 +571,13 @@ public final class PromptBuilder {
 
     private String string(JsonObject object, String name) {
         return object.has(name) && object.get(name).isJsonPrimitive() ? object.get(name).getAsString() : "";
+    }
+
+    private String abbreviate(String value, int maxLength) {
+        String normalized = value == null ? "" : value;
+        if (normalized.length() <= maxLength) return normalized;
+        int half = maxLength / 2;
+        return normalized.substring(0, half) + "\n... omitted ...\n"
+                + normalized.substring(normalized.length() - half);
     }
 }

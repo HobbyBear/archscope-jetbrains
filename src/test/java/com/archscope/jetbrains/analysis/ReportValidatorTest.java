@@ -144,6 +144,24 @@ final class ReportValidatorTest {
     }
 
     @Test
+    void acceptsAnEmptyUnprovenResponsibilityExclusion() throws Exception {
+        EvidencePack snapshot = new EvidencePack(
+                Path.of("/repo"), "head", "head", "head", "treehash", "domain-fingerprint",
+                List.of(), "", List.of(), List.of("src/App.java")
+        );
+        JsonObject response = JsonParser.parseString(businessDomainReport()).getAsJsonObject();
+        response.getAsJsonArray("business_domains").get(0).getAsJsonObject()
+                .add("not_responsible", new JsonArray());
+
+        JsonObject report = validator.validateRepository(
+                response.toString(), snapshot, workspace.resolve("repository")
+        );
+
+        assertTrue(report.getAsJsonArray("business_domains").get(0).getAsJsonObject()
+                .getAsJsonArray("not_responsible").isEmpty());
+    }
+
+    @Test
     void normalizesGlobalDataFlowOrdersWithinEachLineage() throws Exception {
         EvidencePack snapshot = new EvidencePack(
                 Path.of("/repo"), "head", "head", "head", "treehash", "domain-fingerprint",
@@ -209,7 +227,7 @@ final class ReportValidatorTest {
     }
 
     @Test
-    void rejectsShallowBusinessFlowThatAnewcomerCannotFollow() {
+    void acceptsAtomicOneStepBusinessFlow() throws Exception {
         EvidencePack snapshot = new EvidencePack(
                 Path.of("/repo"), "head", "head", "head", "treehash", "domain-fingerprint",
                 List.of(), "", List.of(), List.of("src/App.java")
@@ -219,11 +237,13 @@ final class ReportValidatorTest {
                 .get(0).getAsJsonObject().getAsJsonArray("children");
         while (steps.size() > 1) steps.remove(steps.size() - 1);
 
-        ReportValidationException error = assertThrows(
-                ReportValidationException.class,
-                () -> validator.validateRepository(shallow.toString(), snapshot, workspace.resolve("repository"))
-        );
-        assertTrue(error.getMessage().contains("少于 4 个有序步骤"));
+        shallow.getAsJsonObject("flow_map").getAsJsonArray("children").get(0).getAsJsonObject()
+                .getAsJsonArray("data_flow").remove(1);
+
+        JsonObject validated = validator.validateRepository(
+                shallow.toString(), snapshot, workspace.resolve("repository"));
+        assertEquals(1, validated.getAsJsonObject("flow_map").getAsJsonArray("children")
+                .get(0).getAsJsonObject().getAsJsonArray("children").size());
     }
 
     @Test
@@ -246,7 +266,7 @@ final class ReportValidatorTest {
     }
 
     @Test
-    void rejectsBusinessDomainWithoutReadableInputOutputBoundaries() {
+    void acceptsEmptyPresentationBoundaryWhenSourceDoesNotProveOne() throws Exception {
         EvidencePack snapshot = new EvidencePack(
                 Path.of("/repo"), "head", "head", "head", "treehash", "domain-fingerprint",
                 List.of(), "", List.of(), List.of("src/App.java")
@@ -255,12 +275,10 @@ final class ReportValidatorTest {
         invalid.getAsJsonArray("business_domains").get(0).getAsJsonObject()
                 .add("receives", new JsonArray());
 
-        ReportValidationException error = assertThrows(
-                ReportValidationException.class,
-                () -> validator.validateRepository(invalid.toString(), snapshot, workspace.resolve("repository"))
-        );
-
-        assertTrue(error.getMessage().contains("receives 不能为空"));
+        JsonObject validated = validator.validateRepository(
+                invalid.toString(), snapshot, workspace.resolve("repository"));
+        assertTrue(validated.getAsJsonArray("business_domains").get(0).getAsJsonObject()
+                .getAsJsonArray("receives").isEmpty());
     }
 
     @Test

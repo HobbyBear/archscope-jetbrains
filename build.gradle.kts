@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.archscope"
-version = "0.7.2"
+version = "0.7.9"
 
 dependencies {
     intellijPlatform {
@@ -17,7 +17,8 @@ dependencies {
 
     implementation("com.google.code.gson:gson:2.11.0")
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
-    testRuntimeOnly("junit:junit:4.13.2")
+    testImplementation("junit:junit:4.13.2")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.11.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.11.4")
 }
 
@@ -47,6 +48,7 @@ tasks {
             "archscope.previewDark",
             "archscope.domainBenchmarkRepo",
             "archscope.domainBenchmarkPrompt",
+            "archscope.domainBenchmarkLanguage",
             "archscope.domainBenchmarkOutput",
             "archscope.domainBenchmarkHtmlOutput",
             "archscope.domainCustomPrompt",

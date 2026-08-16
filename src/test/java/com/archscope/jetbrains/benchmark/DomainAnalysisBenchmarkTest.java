@@ -36,7 +36,11 @@ final class DomainAnalysisBenchmarkTest {
                 customPrompt,
                 System.getProperty("archscope.domainSystemPrompt", "")
         );
-        AnalysisRequest request = AnalysisRequest.businessDomain(repository, prompt, guidance);
+        AnalysisRequest.OutputLanguage outputLanguage = "en".equalsIgnoreCase(
+                System.getProperty("archscope.domainBenchmarkLanguage", "zh-CN"))
+                ? AnalysisRequest.OutputLanguage.ENGLISH
+                : AnalysisRequest.OutputLanguage.CHINESE;
+        AnalysisRequest request = AnalysisRequest.businessDomain(repository, prompt, guidance, outputLanguage);
         ProgressIndicator indicator = indicator();
         long startedAt = System.nanoTime();
         EvidencePack evidence = new GitEvidenceService().collectSnapshot(request, indicator);

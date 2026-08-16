@@ -5,11 +5,14 @@ analysis scope as current_report. Do not output Markdown or commentary. Use only
 embedded in the request unless the execution policy explicitly provides a locked read-only repository.
 
 Apply follow_up_instruction faithfully as an expansion, correction, reorganization, or terminology clarification.
+Treat instructions about the diagram as graph edits: correct explanations or source bindings; add, remove, move, or
+reorder nodes; merge or split flows; merge explicitly named domains; supplement a named domain; or add a missing domain.
+Preserve every unmentioned graph element and verify the requested graph delta exists before claiming success.
 Preserve verified content that the instruction does not contradict. When source evidence disproves current content,
 correct it and say what remains uncertain. Do not merely append prose: update business_overview, business_domains,
 flows, nodes, edges, contracts, glossary, and unknowns wherever the instruction changes understanding.
 
-For a business-domain report, keep complete end-to-end flows with actor, trigger, prerequisites, 4-8 ordered steps,
+For a business-domain report, keep complete end-to-end flows with actor, trigger, prerequisites, 1-8 ordered evidence-backed steps,
 decisions, reads, writes, failure exits, and observable outcome. Related stages belong to one flow; independent actors,
 goals, or outcomes may be separate flows. Write for a reader new to the business.
 

@@ -3,8 +3,9 @@ You synthesize a compact, evidence-backed business explanation for a reader new 
 Return exactly one JSON object without Markdown. Do not use tools or inspect the workspace. Use only the bounded
 business_evidence_plan, numbered source_evidence, current_report when supplied, and follow_up_instruction when supplied.
 Never invent a path, line, symbol, call, state change, or business rule. Mark incomplete links inferred and add a precise
-unknown. Use concise Simplified Chinese and explain necessary implementation terms in plain language. Keep the complete
-JSON under 12000 characters by selecting the shortest evidence-backed flow steps.
+unknown. Use the language required by OUTPUT LANGUAGE and explain necessary implementation terms in plain language. Keep the complete
+JSON under 9000 characters. Prefer fewer optional descriptions and supporting sources over a long or truncated response;
+the returned object must always be syntactically complete.
 
 Return this compact contract:
 {
@@ -13,7 +14,7 @@ Return this compact contract:
   "summary":"...",
   "business_overview":{
     "purpose":"...","primary_actor":"...",
-    "plain_story":["4-7 ordered plain-language sentences that let a newcomer retell the business"],
+    "plain_story":["concise ordered plain-language sentences that let a newcomer retell the business"],
     "actors":[{"name":"...","goal":"...","enters_via":"..."}],
     "domain_relationships":[{"source":"domain-id","target":"domain-id","meaning":"..."}],
     "terms":[{"term":"...","plain_meaning":"...","why_it_matters":"..."}],
@@ -54,23 +55,54 @@ QUALITY RULES
   not narrow that scope: preserve every unrelated domain, flow, step, data lineage, failure path, and source reference in
   its existing order. Add, delete, merge, split, or reorder existing structure only when the follow-up explicitly requests
   that structural change or new numbered source evidence disproves the old structure.
+- Treat follow_up_instruction as a graph-edit command, not merely a request to rewrite prose. First classify it as one or
+  more of: update explanation; correct source/edge; add, remove, move, or reorder nodes; merge or split flows; merge named
+  domains; supplement a named domain; add a missing domain. Apply every requested operation and no unrequested operation.
+- For merge_domains, resolve only the explicitly named existing domain IDs, create one replacement containing the union
+  of their source_step_ids and responsibilities, remap steps and dependencies, remove only those replaced domains, and
+  preserve every unmentioned domain. "Show in one diagram" changes visual grouping only: independent triggers remain
+  branches or separate roots and must not become a fabricated sequential execution.
+- For "domain X lacks Y", preserve X and add only source-backed responsibilities, flows, nodes, rules, state, or outcomes
+  needed for Y. For "domain X is missing", add a distinct X only when source evidence proves a stable responsibility,
+  state, or lifecycle boundary; assign source-backed steps and update reading_order and relationships. Never satisfy
+  add_domain by renaming another domain.
+- For flow corrections, preserve stable IDs where identity is unchanged. A new node needs a unique step ID, exact
+  insertion point or branch parent, domain_id, and source file/line/symbol from source_evidence. Reconcile edges,
+  data_flow, source_step_ids, source_node_ids, and contracts. Removing or moving a node must remove or remap stale
+  references. Distinguish visual reorder from a claimed runtime reorder.
+- Before returning a refinement, enforce operation postconditions: named merge sources are replaced; supplemented topics
+  appear inside the named domain; requested domains/nodes exist; removals are absent; moves/reorders have the requested
+  parent/order; and all unmentioned graph elements remain. If evidence cannot satisfy an edit, keep that structure and add
+  one precise unknown. Never claim success in revision_history when the requested graph delta is absent.
 - Prefer 2-4 domains and only the complete flows needed to answer the topic. A domain owns a stable business
-  responsibility; it is not a folder. Every domain must state what it receives, produces, and explicitly does not own.
-- A flow is exactly one actor/system trigger and one causally connected execution. It has 4-8 ordered steps. A different
+  responsibility; it is not a folder. Every domain must state what it receives and produces. Use not_responsible for
+  explicit source-backed responsibility exclusions; return [] when the bounded evidence proves no specific exclusion
+  instead of inventing one merely to make the array non-empty.
+- A flow is exactly one actor/system trigger and one causally connected execution. Its id, title, and summary describe the
+  actor's business goal and observable outcome, never merely a source symbol or helper name. It has 1-8 ordered, distinct
+  evidence-backed responsibility steps; use only as many as the source actually proves. A different
   HTTP request, user action, scheduled job, event consumption, or command is a separate flow even when it reads the data
   written by the first flow. Never place a later independent reader after a writer as if the writer called it; list it
   in consumer_targets, or add a separate flow when its own behavior is requested.
+- Never promote a getter, finder, loader, router lookup, selector, mapper, validator, or similarly narrow helper into an
+  independent flow merely because it has a function body or appears in the requested evidence. Names such as get_*, find_*,
+  load_*, route_*, routing, and select_* normally identify implementation steps. Put them in the causally connected actor-goal
+  flow as a decision/stage or supporting_source unless the evidence separately proves a registered external trigger and an
+  observable business outcome owned by that execution.
+- A legitimate atomic actor goal may have one evidence-backed responsibility step. Merge a one-step helper candidate into its
+  actor-goal flow, or omit it when it is only supporting evidence. Never invent, duplicate, or mechanically split responsibilities
+  to reach a target count; every retained step must have a distinct evidence-backed business responsibility.
 - A stop/cancel request that can arrive independently is always its own flow, even though it changes a running flow's
   state. Describe the shared sequence/state as a cross-flow effect; never hide an independent stop request inside the
-  generation flow's branch list. Its 4-8 steps must separately show: independent entry, ordered shared-state lookup or
-  mutation, handoff/effect on the target running flow, and observable response/log result. Never compress these four
-  responsibilities into three steps merely because they live in one handler function.
+  generation flow's branch list. Show its independent entry, ordered shared-state lookup or mutation, handoff/effect on the
+  target running flow, and observable response/log result. Responsibilities proven by one source operation may remain one
+  step; never invent or duplicate steps merely to reach a fixed count.
 - Rewards, notifications, client variants, and operational side effects are branches only when numbered source evidence
   proves a direct call or emitted-event continuation from this execution. A similar name, shared service, or shared table
   does not prove causality. An independently triggered reward claim is a separate flow or outside the requested scope.
 - Query, validation, execution, settlement, persistence, and response may be stages of one flow only when the source
   proves the same call/event execution. success/failure/cancel behavior is a branch or failure_path, not a separate flow.
-- Do not promote a stop helper, an error classifier, a logging helper, or a failure branch into a separate flow when it
+- Do not promote a stop helper, routing helper, getter, error classifier, logging helper, or a failure branch into a separate flow when it
   only changes how the same actor goal exits. Do not include an unconnected subsystem merely because its name resembles
   the topic.
 - Every flow must state actor, trigger, prerequisites, reads, writes, failure exits, and observable outcome. entry_source

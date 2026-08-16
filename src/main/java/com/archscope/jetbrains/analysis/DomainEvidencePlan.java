@@ -4,7 +4,6 @@ import com.archscope.jetbrains.model.EvidencePack;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -15,16 +14,25 @@ import java.util.Comparator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public record DomainEvidencePlan(String json, List<String> candidatePaths, List<Query> queries) {
+public record DomainEvidencePlan(
+        String json,
+        List<String> candidatePaths,
+        List<Query> queries,
+        EditIntent editIntent
+) {
     private static final String SCHEMA = "business-domain-evidence-plan/v1";
     private static final Pattern IDENTIFIER = Pattern.compile("\\b[A-Za-z_][A-Za-z0-9_]{4,}\\b");
+
+    public DomainEvidencePlan(String json, List<String> candidatePaths, List<Query> queries) {
+        this(json, candidatePaths, queries, EditIntent.initial());
+    }
 
     public static DomainEvidencePlan parse(String raw, EvidencePack evidence) throws ModelClientException {
         JsonObject root;
         try {
-            root = JsonParser.parseString(stripFence(raw)).getAsJsonObject();
+            root = ModelJsonParser.parseObject(raw);
         } catch (RuntimeException exception) {
-            throw new ModelClientException("模型没有返回合法的业务证据计划：" + exception.getMessage(), exception);
+            root = parseTextSlots(raw);
         }
         if (!SCHEMA.equals(string(root, "schema"))) {
             throw new ModelClientException("业务证据计划 schema 无效");
@@ -50,8 +58,15 @@ public record DomainEvidencePlan(String json, List<String> candidatePaths, List<
                 if (queries.size() == 8) break;
             }
         }
-        if (paths.isEmpty() && queries.isEmpty()) {
-            throw new ModelClientException("模型没有为该业务主题定位到可搜索的源码范围");
+        EditIntent editIntent = EditIntent.parse(root);
+        if (paths.isEmpty() && queries.isEmpty() && editIntent.evidenceRequired()) {
+            paths = evidence.targetManifest().stream()
+                    .filter(DomainEvidencePlan::isAnalyzablePath)
+                    .limit(6)
+                    .toList();
+        }
+        if (paths.isEmpty() && editIntent.evidenceRequired()) {
+            throw new ModelClientException("当前仓库清单中没有可用于业务分析的源码文件");
         }
 
         JsonArray normalizedPaths = new JsonArray();
@@ -66,12 +81,79 @@ public record DomainEvidencePlan(String json, List<String> candidatePaths, List<
             normalizedQueries.add(item);
         }
         root.add("queries", normalizedQueries);
-        return new DomainEvidencePlan(root.toString(), paths, List.copyOf(queries));
+        return new DomainEvidencePlan(root.toString(), paths, List.copyOf(queries), editIntent);
+    }
+
+    private static JsonObject parseTextSlots(String raw) throws ModelClientException {
+        JsonObject root = new JsonObject();
+        JsonObject intent = new JsonObject();
+        JsonArray operations = new JsonArray();
+        JsonArray domainIds = new JsonArray();
+        JsonArray flowIds = new JsonArray();
+        JsonArray stepIds = new JsonArray();
+        JsonArray topics = new JsonArray();
+        JsonArray paths = new JsonArray();
+        JsonArray queries = new JsonArray();
+        JsonArray domains = new JsonArray();
+        for (String line : (raw == null ? "" : raw).lines().toList()) {
+            if (line.isBlank()) continue;
+            String[] fields = line.split("\\t", 4);
+            String key = fields[0].strip().toUpperCase(java.util.Locale.ROOT);
+            String value = fields.length > 1 ? fields[1].strip() : "";
+            switch (key) {
+                case "SCHEMA" -> root.addProperty("schema", value);
+                case "TOPIC" -> root.addProperty("topic", value);
+                case "OPERATIONS" -> addCsv(operations, value);
+                case "TARGET_DOMAIN_IDS" -> addCsv(domainIds, value);
+                case "TARGET_FLOW_IDS" -> addCsv(flowIds, value);
+                case "TARGET_STEP_IDS" -> addCsv(stepIds, value);
+                case "REQUESTED_TOPICS" -> addCsv(topics, value);
+                case "EVIDENCE_REQUIRED" -> intent.addProperty("evidence_required", Boolean.parseBoolean(value));
+                case "CANDIDATE_PATH" -> { if (!value.isBlank()) paths.add(value); }
+                case "QUERY" -> {
+                    if (fields.length < 3 || value.isBlank()) break;
+                    JsonObject query = new JsonObject();
+                    query.addProperty("literal", value);
+                    query.addProperty("role", fields[2].strip());
+                    query.addProperty("reason", fields.length > 3 ? fields[3].strip() : "");
+                    queries.add(query);
+                }
+                case "LIKELY_DOMAIN" -> {
+                    if (fields.length < 3 || value.isBlank()) break;
+                    JsonObject domain = new JsonObject();
+                    domain.addProperty("id", value);
+                    domain.addProperty("name", fields[2].strip());
+                    domain.addProperty("purpose", fields.length > 3 ? fields[3].strip() : "");
+                    domains.add(domain);
+                }
+                default -> { }
+            }
+        }
+        if (!SCHEMA.equals(string(root, "schema"))) {
+            throw new ModelClientException("模型没有返回可识别的业务证据计划文本槽位");
+        }
+        intent.add("operations", operations);
+        intent.add("target_domain_ids", domainIds);
+        intent.add("target_flow_ids", flowIds);
+        intent.add("target_step_ids", stepIds);
+        intent.add("requested_topics", topics);
+        root.add("refinement_intent", intent);
+        root.add("likely_domains", domains);
+        root.add("candidate_paths", paths);
+        root.add("queries", queries);
+        return root;
+    }
+
+    private static void addCsv(JsonArray target, String value) {
+        for (String item : value.split(",")) {
+            String normalized = item.strip();
+            if (!normalized.isBlank()) target.add(normalized);
+        }
     }
 
     public DomainEvidencePlan withUnresolvedQueries(String currentReportJson) {
         try {
-            JsonObject report = JsonParser.parseString(currentReportJson).getAsJsonObject();
+            JsonObject report = ModelJsonParser.parseObject(currentReportJson);
             JsonArray unknowns = array(report, "unknowns");
             if (unknowns == null) return this;
             LinkedHashSet<String> existing = new LinkedHashSet<>();
@@ -103,7 +185,7 @@ public record DomainEvidencePlan(String json, List<String> candidatePaths, List<
                     combined.add(new Query(identifier, "unknown", "补齐当前报告明确标出的源码证据缺口"));
                 }
             }
-            JsonObject normalized = JsonParser.parseString(json).getAsJsonObject();
+            JsonObject normalized = ModelJsonParser.parseObject(json);
             JsonArray normalizedQueries = new JsonArray();
             for (Query query : combined) {
                 JsonObject item = new JsonObject();
@@ -113,21 +195,21 @@ public record DomainEvidencePlan(String json, List<String> candidatePaths, List<
                 normalizedQueries.add(item);
             }
             normalized.add("queries", normalizedQueries);
-            return new DomainEvidencePlan(normalized.toString(), candidatePaths, List.copyOf(combined));
+            return new DomainEvidencePlan(normalized.toString(), candidatePaths, List.copyOf(combined), editIntent);
         } catch (RuntimeException ignored) {
             return this;
         }
     }
 
     public DomainEvidencePlan unresolvedOnly(String currentReportJson) {
-        return new DomainEvidencePlan(json, List.of(), List.of()).withUnresolvedQueries(currentReportJson);
+        return new DomainEvidencePlan(json, List.of(), List.of(), editIntent).withUnresolvedQueries(currentReportJson);
     }
 
     public DomainEvidencePlan excludingQueries(Set<String> excluded) {
         if (excluded == null || excluded.isEmpty()) return this;
         List<Query> remaining = queries.stream().filter(query -> !excluded.contains(query.literal())).toList();
         if (remaining.size() == queries.size()) return this;
-        JsonObject normalized = JsonParser.parseString(json).getAsJsonObject();
+        JsonObject normalized = ModelJsonParser.parseObject(json);
         JsonArray normalizedQueries = new JsonArray();
         for (Query query : remaining) {
             JsonObject item = new JsonObject();
@@ -137,7 +219,7 @@ public record DomainEvidencePlan(String json, List<String> candidatePaths, List<
             normalizedQueries.add(item);
         }
         normalized.add("queries", normalizedQueries);
-        return new DomainEvidencePlan(normalized.toString(), candidatePaths, remaining);
+        return new DomainEvidencePlan(normalized.toString(), candidatePaths, remaining, editIntent);
     }
 
     public DomainEvidencePlan retainingQueriesIn(String sourceText) {
@@ -147,6 +229,81 @@ public record DomainEvidencePlan(String json, List<String> candidatePaths, List<
                 .filter(literal -> !source.contains(literal))
                 .collect(java.util.stream.Collectors.toSet());
         return excludingQueries(removed);
+    }
+
+    public record EditIntent(
+            Set<Operation> operations,
+            List<String> targetDomainIds,
+            List<String> targetFlowIds,
+            List<String> targetStepIds,
+            List<String> requestedTopics,
+            boolean evidenceRequired
+    ) {
+        static EditIntent initial() {
+            return new EditIntent(Set.of(Operation.INITIAL), List.of(), List.of(), List.of(), List.of(), true);
+        }
+
+        static EditIntent parse(JsonObject root) {
+            if (!root.has("refinement_intent") || !root.get("refinement_intent").isJsonObject()) return initial();
+            JsonObject value = root.getAsJsonObject("refinement_intent");
+            LinkedHashSet<Operation> operations = new LinkedHashSet<>();
+            JsonArray operationItems = array(value, "operations");
+            if (operationItems != null) {
+                for (String item : strings(operationItems)) operations.add(Operation.parse(item));
+            }
+            String singular = string(value, "operation");
+            if (!singular.isBlank()) operations.add(Operation.parse(singular));
+            operations.remove(Operation.UNKNOWN);
+            if (operations.isEmpty()) operations.add(Operation.UNKNOWN);
+            boolean evidenceRequired = value.has("evidence_required")
+                    ? value.get("evidence_required").getAsBoolean()
+                    : operations.stream().anyMatch(Operation::normallyRequiresEvidence);
+            if (operations.contains(Operation.UNKNOWN)) evidenceRequired = true;
+            return new EditIntent(
+                    Set.copyOf(operations),
+                    strings(array(value, "target_domain_ids")),
+                    strings(array(value, "target_flow_ids")),
+                    strings(array(value, "target_step_ids")),
+                    strings(array(value, "requested_topics")),
+                    evidenceRequired
+            );
+        }
+
+        boolean structural() {
+            return operations.stream().anyMatch(Operation::structural);
+        }
+
+        boolean has(Operation operation) {
+            return operations.contains(operation);
+        }
+    }
+
+    public enum Operation {
+        INITIAL, UPDATE_EXPLANATION, MERGE_DOMAINS, SUPPLEMENT_DOMAIN, ADD_DOMAIN, CORRECT_FLOW,
+        ADD_NODES, REMOVE_NODES, MOVE_NODES, REORDER_NODES, MERGE_FLOWS, SPLIT_FLOW, UNKNOWN;
+
+        static Operation parse(String value) {
+            try {
+                return value == null ? UNKNOWN : valueOf(value.strip().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                return UNKNOWN;
+            }
+        }
+
+        boolean normallyRequiresEvidence() {
+            return switch (this) {
+                case INITIAL, SUPPLEMENT_DOMAIN, ADD_DOMAIN, CORRECT_FLOW, ADD_NODES, UNKNOWN -> true;
+                default -> false;
+            };
+        }
+
+        boolean structural() {
+            return switch (this) {
+                case MERGE_DOMAINS, ADD_DOMAIN, ADD_NODES, REMOVE_NODES, MOVE_NODES, REORDER_NODES,
+                        MERGE_FLOWS, SPLIT_FLOW -> true;
+                default -> false;
+            };
+        }
     }
 
     static DomainEvidencePlan frontierFromResolution(
@@ -160,9 +317,9 @@ public record DomainEvidencePlan(String json, List<String> candidatePaths, List<
         normalized.add("candidate_paths", new JsonArray());
         normalized.add("queries", new JsonArray());
         try {
-            JsonObject resolution = JsonParser.parseString(stripFence(rawResolution)).getAsJsonObject();
-            JsonObject report = JsonParser.parseString(currentReportJson).getAsJsonObject();
-            JsonObject evidenceRoot = JsonParser.parseString(sourceEvidence).getAsJsonObject();
+            JsonObject resolution = ModelJsonParser.parseObject(rawResolution);
+            JsonObject report = ModelJsonParser.parseObject(currentReportJson);
+            JsonObject evidenceRoot = ModelJsonParser.parseObject(sourceEvidence);
             Set<String> questions = new LinkedHashSet<>();
             JsonArray unknowns = array(report, "unknowns");
             if (unknowns != null) {
