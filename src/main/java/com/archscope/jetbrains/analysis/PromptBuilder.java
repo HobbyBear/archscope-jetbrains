@@ -299,7 +299,7 @@ public final class PromptBuilder {
 
     public String userPrompt(AnalysisRequest request, EvidencePack evidence) {
         JsonObject payload = basePayload(request, evidence);
-        payload.addProperty("task", "AI Code Review & Understanding: analyze the selected Git commits and produce the final architecture report JSON.");
+        payload.addProperty("task", "CodeBecause: analyze the selected Git commits and produce the final architecture report JSON.");
         payload.addProperty("workspace_instruction", "The production pipeline embeds a closed evidence bundle and does not permit autonomous repository exploration. Stop once every changed behavior has a before/after explanation and observable outcome.");
         payload.addProperty("final_instruction", "Return exactly one change-centered JSON object and distinguish changed, affected, and context nodes.");
         return GSON.toJson(payload);

@@ -1,7 +1,7 @@
 <idea-plugin>
-    <id>com.archscope.jetbrains</id>
-    <name>AI Code Review &amp; Understanding</name>
-    <vendor>AI Code Review &amp; Understanding</vendor>
+    <id>com.codebecause.jetbrains</id>
+    <name>CodeBecause</name>
+    <vendor>CodeBecause</vendor>
 
     <description><![CDATA[
         Analyze selected Git changes or a user-defined business topic, then refine the resulting
@@ -14,9 +14,9 @@
     <extensions defaultExtensionNs="com.intellij">
         <fileEditorProvider implementation="com.archscope.jetbrains.ui.ArchitectureReportFileEditorProvider"/>
         <toolWindow
-                id="AI Code Review &amp; Understanding"
+                id="CodeBecause"
                 anchor="right"
-                icon="/icons/archscope.svg"
+                icon="/icons/codebecause.svg"
                 factoryClass="com.archscope.jetbrains.ui.ArchitectureToolWindowFactory"/>
     </extensions>
 
@@ -24,7 +24,7 @@
         <action
                 id="ArchScope.OpenToolWindow"
                 class="com.archscope.jetbrains.ui.OpenArchScopeAction"
-                text="Open AI Code Review &amp; Understanding"
+                text="Open CodeBecause"
                 description="Select Git commits and generate an architecture review">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
@@ -33,7 +33,7 @@
                 class="com.archscope.jetbrains.ui.AnalyzeGitLogSelectionAction"
                 text="AI 分析选中提交"
                 description="分析 Git 日志中选中的一条或多条提交"
-                icon="/icons/archscope.svg">
+                icon="/icons/codebecause.svg">
             <add-to-group group-id="Vcs.Log.ContextMenu" anchor="last"/>
         </action>
     </actions>

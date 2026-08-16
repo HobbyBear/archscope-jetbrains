@@ -1,4 +1,4 @@
-# AI Code Review & Understanding
+# CodeBecause
 
 JetBrains plugin for evidence-backed change review and business understanding. It can analyze selected Git commits or a
 natural-language topic such as "分析聊天逻辑", then keep refining the generated report inside the IDE.

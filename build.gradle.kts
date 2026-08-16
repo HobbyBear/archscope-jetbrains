@@ -72,7 +72,7 @@ tasks {
 
 intellijPlatform {
     pluginConfiguration {
-        name = "AI Code Review & Understanding"
+        name = "CodeBecause"
         version = project.version.toString()
         description = """
             Analyze selected Git changes or a user-defined business topic with a configurable
@@ -84,7 +84,7 @@ intellijPlatform {
         }
 
         vendor {
-            name = "AI Code Review & Understanding"
+            name = "CodeBecause"
         }
     }
 

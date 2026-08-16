@@ -137,9 +137,9 @@ final class ArchitectureToolWindowPanel implements Disposable {
             String targetCommit
     ) {
         ToolWindow toolWindow = ToolWindowManager.getInstance(project)
-                .getToolWindow("AI Code Review & Understanding");
+                .getToolWindow("CodeBecause");
         if (toolWindow == null) {
-            Messages.showErrorDialog(project, "无法打开 AI Code Review 工具窗口。", "AI Code Review & Understanding");
+            Messages.showErrorDialog(project, "无法打开 CodeBecause 工具窗口。", "CodeBecause");
             return;
         }
         toolWindow.show(() -> runWhenPanelReady(project, repositoryRoot, commits, targetCommit, 0));
@@ -158,7 +158,7 @@ final class ArchitectureToolWindowPanel implements Disposable {
             return;
         }
         if (attempt >= 2) {
-            Messages.showErrorDialog(project, "AI Code Review 工具窗口尚未初始化。", "AI Code Review & Understanding");
+            Messages.showErrorDialog(project, "CodeBecause 工具窗口尚未初始化。", "CodeBecause");
             return;
         }
         ApplicationManager.getApplication().invokeLater(
@@ -603,7 +603,7 @@ final class ArchitectureToolWindowPanel implements Disposable {
         }
         editors.openFile(reportFile, true);
         ToolWindow toolWindow = ToolWindowManager.getInstance(project)
-                .getToolWindow("AI Code Review & Understanding");
+                .getToolWindow("CodeBecause");
         if (toolWindow != null && toolWindow.isVisible()) toolWindow.hide();
     }
 
@@ -776,7 +776,7 @@ final class ArchitectureToolWindowPanel implements Disposable {
         AnalysisResult current = reportFile != null && reportFile.isValid() ? reportFile.currentResult() : lastResult;
         if (current == null || repositoryRoot == null) return;
         FileSaverDescriptor descriptor = new FileSaverDescriptor(
-                "导出 AI Code Review & Understanding 报告",
+                "导出 CodeBecause 报告",
                 "报告包含锁定提交指纹和源码位置。",
                 extension
         );
@@ -846,7 +846,7 @@ final class ArchitectureToolWindowPanel implements Disposable {
         Messages.showErrorDialog(
                 project,
                 cause.getMessage() == null ? cause.toString() : cause.getMessage(),
-                "AI Code Review & Understanding"
+                "CodeBecause"
         );
     }
 

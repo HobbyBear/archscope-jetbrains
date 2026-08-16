@@ -13,7 +13,7 @@ public final class OpenArchScopeAction extends AnAction {
     public void actionPerformed(@NotNull AnActionEvent event) {
         Project project = event.getProject();
         if (project == null) return;
-        ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("AI Code Review & Understanding");
+        ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("CodeBecause");
         if (toolWindow != null) toolWindow.show();
     }
 

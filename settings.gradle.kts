@@ -21,4 +21,4 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ai-code-review-understanding"
+rootProject.name = "codebecause"
