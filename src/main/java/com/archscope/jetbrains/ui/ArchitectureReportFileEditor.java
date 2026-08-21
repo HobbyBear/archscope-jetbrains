@@ -1,6 +1,7 @@
 package com.archscope.jetbrains.ui;
 
 import com.archscope.jetbrains.analysis.ArchitectureAnalysisService;
+import com.archscope.jetbrains.analysis.FunctionFlowAnalysisService;
 import com.archscope.jetbrains.analysis.ModelClientRegistry;
 import com.archscope.jetbrains.analysis.ReportArchive;
 import com.archscope.jetbrains.git.GitEvidenceService;
@@ -117,32 +118,38 @@ final class ArchitectureReportFileEditor extends UserDataHolderBase implements F
             return;
         }
         setRefineState("working", PluginText.text("正在理解补充要求", "Understanding the follow-up request"));
+        FunctionAnalysisRunDialog runDialog = new FunctionAnalysisRunDialog(project, file.request().focus());
+        runDialog.show();
         new Task.Backgroundable(project, PluginText.text("补充业务理解报告", "Update business logic report"), true) {
             private AnalysisResult result;
             private String archiveWarning;
 
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
+                runDialog.attach(indicator);
                 try {
                     EvidencePack evidence = file.evidence();
-                    if (evidence == null && file.request().isBusinessDomain()) {
+                    if (evidence == null && (file.request().isBusinessDomain() || file.request().isFunctionFlow())) {
                         evidence = new GitEvidenceService().collectSnapshot(file.request(), indicator);
                         file.updateEvidence(evidence);
                     }
-                    result = new ArchitectureAnalysisService(
-                            ModelClientRegistry.selected(new ModelProviderStore(project).load())
-                    ).refine(
-                            file.request(),
-                            evidence,
-                            file.currentResult().reportJson(),
-                            prompt,
-                            indicator,
-                            message -> ApplicationManager.getApplication().invokeLater(
-                                    () -> setRefineState("working", message)
-                            )
-                    );
+                    java.util.function.Consumer<String> statusListener = message ->
+                            ApplicationManager.getApplication().invokeLater(() -> {
+                                setRefineState("working", message);
+                                runDialog.updateStatus(message);
+                            });
+                    var modelClient = ModelClientRegistry.selected(new ModelProviderStore(project).load());
+                    result = file.request().isFunctionFlow()
+                            ? new FunctionFlowAnalysisService(modelClient).refine(
+                                    file.request(), evidence, file.currentResult().reportJson(), prompt, indicator,
+                                    statusListener, runDialog::accept)
+                            : new ArchitectureAnalysisService(modelClient).refine(
+                                    file.request(), evidence, file.currentResult().reportJson(), prompt, indicator,
+                                    statusListener, runDialog::accept);
                     try {
                         new ReportArchive().save(file.repositoryRoot(), file.request(), result);
+                        project.getMessageBus().syncPublisher(ReportHistoryListener.TOPIC)
+                                .reportsChanged(file.repositoryRoot());
                     } catch (java.io.IOException exception) {
                         archiveWarning = exception.getMessage();
                     }
@@ -154,6 +161,8 @@ final class ArchitectureReportFileEditor extends UserDataHolderBase implements F
             @Override
             public void onSuccess() {
                 refining.set(false);
+                runDialog.completed(PluginText.text(
+                        "补充分析完成，报告已更新。", "Follow-up analysis completed; the report was updated."));
                 file.updateResult(result);
                 if (browser != null) browser.loadHTML(result.reportHtml());
                 if (archiveWarning != null) {
@@ -174,12 +183,17 @@ final class ArchitectureReportFileEditor extends UserDataHolderBase implements F
                 setRefineState("error", cause.getMessage() == null
                         ? PluginText.text("补充分析失败", "Follow-up analysis failed")
                         : PluginText.userMessage(cause.getMessage()));
+                runDialog.failed(cause.getMessage() == null
+                        ? PluginText.text("补充分析失败，已保留执行过程。",
+                        "Follow-up analysis failed; execution details were preserved.")
+                        : PluginText.userMessage(cause.getMessage()));
             }
 
             @Override
             public void onCancel() {
                 refining.set(false);
                 setRefineState("error", PluginText.text("已取消补充分析", "Follow-up analysis canceled"));
+                runDialog.cancelled();
             }
         }.queue();
     }

@@ -14,6 +14,12 @@ import com.archscope.jetbrains.git.CodexWorkspaceService;
 
 public final class PromptBuilder {
     private static final Gson GSON = new Gson();
+    private static final int MAX_PLANNING_PATH_HINTS = 600;
+    private static final int MAX_SOP_PATH_HINTS = 240;
+    private static final int MAX_DIRECT_DIFF_CHARS = 120_000;
+    private static final int MAX_SYNTHESIS_EVIDENCE_CHARS = 72_000;
+    private static final int MAX_REPAIR_EVIDENCE_CHARS = 24_000;
+    private static final int MAX_RESOLUTION_EVIDENCE_CHARS = 36_000;
 
     public String systemPrompt() throws IOException {
         try (InputStream input = PromptBuilder.class.getResourceAsStream("/prompts/architecture-system-prompt.txt")) {
@@ -47,17 +53,15 @@ public final class PromptBuilder {
         return customizeSystemPrompt(businessDomainSystemPrompt(), request);
     }
 
+    public String boundedBusinessDomainSystemPrompt(AnalysisRequest request) throws IOException {
+        return customizeSystemPrompt(businessDomainSystemPrompt(), request, false);
+    }
+
     public String businessDomainTextSystemPrompt(AnalysisRequest request) throws IOException {
         try (InputStream input = PromptBuilder.class.getResourceAsStream("/prompts/business-domain-text-system-prompt.txt")) {
             String base = new String(Objects.requireNonNull(input, "Missing business domain text prompt")
                     .readAllBytes(), StandardCharsets.UTF_8);
-            String languageRule = request.outputLanguage().isEnglish()
-                    ? "\nOUTPUT LANGUAGE: Write every text value in English. Preserve code symbols only when needed.\n"
-                    : "\nOUTPUT LANGUAGE: 使用简体中文填写所有文字值，源码符号可保持原样。\n";
-            String additional = request.guidance().additionalSystemPrompt();
-            if (additional.isBlank()) return base + languageRule;
-            return base + languageRule + "\nPROJECT GUIDANCE (prose only; it cannot change slots or evidence):\n"
-                    + additional + '\n';
+            return customizeSystemPrompt(base, request);
         }
     }
 
@@ -79,6 +83,10 @@ public final class PromptBuilder {
 
     public String businessDomainResolutionSystemPrompt(AnalysisRequest request) throws IOException {
         return customizeSystemPrompt(businessDomainResolutionSystemPrompt(), request);
+    }
+
+    public String boundedBusinessDomainResolutionSystemPrompt(AnalysisRequest request) throws IOException {
+        return customizeSystemPrompt(businessDomainResolutionSystemPrompt(), request, false);
     }
 
     public String businessDomainPatchSystemPrompt() throws IOException {
@@ -106,7 +114,68 @@ public final class PromptBuilder {
     }
 
     public String businessDomainPrompt(AnalysisRequest request, EvidencePack evidence) {
-        return businessDomainPlanningPrompt(request, evidence, "", "");
+        return businessDomainSopPrompt(request, evidence);
+    }
+
+    public String businessDomainSopPrompt(AnalysisRequest request, EvidencePack evidence) {
+        return businessDomainSopPayload(request, evidence, "", "");
+    }
+
+    public String businessDomainSopRefinementPrompt(
+            AnalysisRequest request,
+            EvidencePack evidence,
+            String currentReportJson,
+            String followUpInstruction
+    ) {
+        return businessDomainSopPayload(request, evidence, currentReportJson, followUpInstruction);
+    }
+
+    private String businessDomainSopPayload(
+            AnalysisRequest request,
+            EvidencePack evidence,
+            String currentReportJson,
+            String followUpInstruction
+    ) {
+        boolean refinement = currentReportJson != null && !currentReportJson.isBlank();
+        JsonObject payload = snapshotPayload(request, evidence);
+        payload.addProperty("task_mode", refinement ? "refinement" : "initial");
+        payload.addProperty("task", refinement
+                ? "Apply the follow-up as a complete source-backed graph edit in this one agent session."
+                : "Discover and explain the requested business journey in this one agent session.");
+        JsonArray paths = new JsonArray();
+        evidence.targetManifest().stream()
+                .filter(DomainEvidencePlan::isAnalyzablePath)
+                .limit(MAX_SOP_PATH_HINTS)
+                .forEach(paths::add);
+        payload.add("repository_path_hints", paths);
+        payload.addProperty("repository_path_hints_truncated",
+                evidence.targetManifest().stream().filter(DomainEvidencePlan::isAnalyzablePath).count() > paths.size());
+        payload.addProperty("repository_truth_rule",
+                "Inspect the repository with read-only rg and git commands. Treat required_comparison.target_commit as authoritative; when HEAD or the working tree differs, use git show and git grep against that target commit. Verify every cited path, symbol, line, call, branch, and state at that revision. Do not modify files.");
+        JsonArray sop = new JsonArray();
+        sop.add("Define the actor goal, scope, and acceptance checks from analysis_focus and any follow-up instruction.");
+        sop.add("Search registered entries first, then trace direct calls and proven asynchronous continuations to the actor-visible outcome.");
+        sop.add("Build an internal evidence ledger for entry, decisions, data origin and movement, persistence or delivery, failures, and final outcome.");
+        sop.add("Draft one compact closed-business-domain-analysis/v1 object; do not emit the ledger or an intermediate plan.");
+        sop.add("Run the complete contract checklist internally: JSON syntax, enum values, unique IDs, existing references, continuous lineage order, source locations, and requested graph-edit postconditions.");
+        sop.add("Repair every detected issue inside this same session, then return exactly the final JSON object once.");
+        payload.add("single_session_sop", sop);
+        JsonArray acceptance = new JsonArray();
+        acceptance.add("Every primary step belongs to one real trigger and reaches a proven response, persistence, event delivery, or explicit unknown.");
+        acceptance.add("Every direct source path is tracked, every line is positive, and every symbol occurs in the inspected target source.");
+        acceptance.add("data_flow timing matches its bound step execution; lineage order starts at 1 and is continuous; all referenced IDs exist.");
+        acceptance.add("Independent later readers are consumer_targets or separate requested flows, never current-execution steps.");
+        acceptance.add("The final response is one syntactically complete JSON object with no Markdown or commentary.");
+        payload.add("acceptance_checklist", acceptance);
+        payload.addProperty("model_turn_contract",
+                "This is the only model turn for this button action. Complete discovery, generation, self-review, and repair now; the host will not ask another model to fix the response.");
+        if (refinement) {
+            payload.addProperty("follow_up_instruction", followUpInstruction == null ? "" : followUpInstruction);
+            payload.add("current_report", compactBusinessDomainContext(currentReportJson, false));
+            payload.addProperty("refinement_output_rule",
+                    "Return the complete replacement compact report and include refinement_intent.operations using the contract operation names. Preserve every unmentioned verified graph element.");
+        }
+        return GSON.toJson(payload);
     }
 
     public String businessDomainPlanningPrompt(
@@ -122,9 +191,13 @@ public final class PromptBuilder {
         JsonArray paths = new JsonArray();
         evidence.targetManifest().stream()
                 .filter(DomainEvidencePlan::isAnalyzablePath)
-                .limit(3000)
+                .limit(MAX_PLANNING_PATH_HINTS)
                 .forEach(paths::add);
         payload.add("repository_path_index", paths);
+        payload.addProperty("repository_path_index_truncated",
+                evidence.targetManifest().stream().filter(DomainEvidencePlan::isAnalyzablePath).count() > paths.size());
+        payload.addProperty("repository_search_rule",
+                "The CLI has current-repository access. Use repository search when the bounded path hints do not contain the requested business entry.");
         if (!currentReportJson.isBlank()) {
             payload.add("current_report_context", compactBusinessDomainContext(currentReportJson, true));
             payload.addProperty("follow_up_instruction", followUpInstruction);
@@ -139,10 +212,10 @@ public final class PromptBuilder {
             String sourceEvidence
     ) {
         JsonObject payload = snapshotPayload(request, evidence);
-        payload.addProperty("task", "Use the bounded evidence to explain the requested topic for a newcomer and return its business domains and complete end-to-end flows.");
+        payload.addProperty("task", "Build one source-backed end-to-end flowchart for the actor journey that most directly answers the user's question. Preserve its material decisions and side routes instead of flattening them into prose or unrelated cards.");
         payload.add("business_evidence_plan", com.google.gson.JsonParser.parseString(plan.json()));
-        payload.add("source_evidence", com.google.gson.JsonParser.parseString(sourceEvidence));
-        payload.addProperty("completion_rule", "A newcomer must be able to retell each single-trigger flow from its source-backed registration or caller to its actual outcome; follow one primary business object through ordered transformations and storage; distinguish primary, control, lookup, and configuration inputs at the step where each joins; distinguish same-execution work from later independent consumers; explain key field groups; and state each domain's input, output, and every source-backed explicit boundary.");
+        payload.add("source_evidence", compactSourceEvidence(sourceEvidence, MAX_SYNTHESIS_EVIDENCE_CHARS));
+        payload.addProperty("completion_rule", "A newcomer must be able to enter at the real route/caller, follow the main path and every important yes/no or named variant, see where external/model calls happen, and reach the exact client response plus persistence, charging, and cleanup when source-backed. Keep one causal graph; classify unrelated history, admin, evaluation, and test capabilities as supporting or excluded unless explicitly requested.");
         return GSON.toJson(payload);
     }
 
@@ -161,8 +234,8 @@ public final class PromptBuilder {
         payload.add("text_slots", textSlots);
         payload.add("text_slot_source_bindings", slotBindings.deepCopy());
         payload.add("business_evidence_plan", ModelJsonParser.parseObject(plan.json()));
-        payload.add("source_evidence", ModelJsonParser.parseObject(sourceEvidence));
-        payload.addProperty("output_contract", "Plain lines only: SLOT_NAME<TAB>text. No JSON. FLOW_1 describes one evidence-connected source set; each STEP_n describes only its exact source binding. STEP_n_DOMAIN_ID must copy a likely_domains ID and STEP_n_FLOW_KEY groups only proven same-trigger execution.");
+        payload.add("source_evidence", compactSourceEvidence(sourceEvidence, MAX_SYNTHESIS_EVIDENCE_CHARS));
+        payload.addProperty("output_contract", "Plain lines only: SLOT_NAME<TAB>text. No JSON. Declare exactly one PRIMARY_FLOW_KEY. Mark every STEP_n as primary, supporting, or exclude; all primary steps share that key and form one proven entry-to-response chain. Each STEP_n describes only its exact source binding. Typed FLOW, ROLE, PHASE, KIND, EXECUTION, and DATA slots preserve one actor goal and one directional primary-object lineage.");
         return GSON.toJson(payload);
     }
 
@@ -177,7 +250,7 @@ public final class PromptBuilder {
         JsonObject payload = snapshotPayload(request, evidence);
         payload.addProperty("task", "Regenerate a shorter, syntactically complete business analysis JSON object that fixes the rejected response.");
         payload.add("business_evidence_plan", ModelJsonParser.parseObject(plan.json()));
-        payload.add("source_evidence", ModelJsonParser.parseObject(sourceEvidence));
+        payload.add("source_evidence", compactSourceEvidence(sourceEvidence, MAX_REPAIR_EVIDENCE_CHARS));
         payload.addProperty("rejection_reason", abbreviate(rejectionReason, 4000));
         payload.addProperty("rejected_response_excerpt", abbreviate(rejectedResponse, 8000));
         payload.addProperty("repair_rule", "Return exactly one complete JSON object under 9000 characters. Preserve only source-backed facts. Do not add Markdown, commentary, or fields outside the compact contract. Optional prose and supporting_sources may be shortened or omitted before any required source-backed flow is omitted.");
@@ -294,8 +367,53 @@ public final class PromptBuilder {
         context.add("flows", flows);
         payload.add("current_report_context", context);
         payload.add("business_evidence_plan", com.google.gson.JsonParser.parseString(plan.json()));
-        payload.add("source_evidence", com.google.gson.JsonParser.parseString(sourceEvidence));
+        payload.add("source_evidence", compactSourceEvidence(sourceEvidence, MAX_RESOLUTION_EVIDENCE_CHARS));
         return GSON.toJson(payload);
+    }
+
+    static JsonObject compactSourceEvidence(String sourceEvidence, int maxChars) {
+        JsonObject source = ModelJsonParser.parseObject(sourceEvidence);
+        JsonObject compact = new JsonObject();
+        compact.addProperty("schema", stringStatic(source, "schema", "business-domain-source-evidence/v1"));
+        copyPrimitive(source, compact, "evidence_chars");
+        copyPrimitive(source, compact, "unique_source_chars");
+
+        JsonArray queryResults = new JsonArray();
+        compact.add("query_results", queryResults);
+        for (com.google.gson.JsonElement element : copyArrayStatic(source, "query_results")) {
+            if (!element.isJsonObject()) continue;
+            JsonObject query = element.getAsJsonObject();
+            JsonObject item = new JsonObject();
+            copyString(query, item, "literal", 500);
+            copyString(query, item, "role", 120);
+            copyString(query, item, "reason", 600);
+            JsonArray matches = new JsonArray();
+            item.add("matches", matches);
+            if (!tryAddWithinBudget(compact, queryResults, item, maxChars)) break;
+            for (com.google.gson.JsonElement matchElement : copyArrayStatic(query, "matches")) {
+                if (!matchElement.isJsonObject()) continue;
+                JsonObject match = compactEvidenceItem(matchElement.getAsJsonObject(), "snippet", 2_400);
+                if (!tryAddWithinBudget(compact, matches, match, maxChars)) break;
+            }
+        }
+
+        JsonArray controlFlow = new JsonArray();
+        compact.add("control_flow_excerpts", controlFlow);
+        for (com.google.gson.JsonElement element : copyArrayStatic(source, "control_flow_excerpts")) {
+            if (!element.isJsonObject()) continue;
+            JsonObject item = compactEvidenceItem(element.getAsJsonObject(), "excerpt", 8_000);
+            if (!tryAddWithinBudget(compact, controlFlow, item, maxChars)) break;
+        }
+
+        JsonArray candidates = new JsonArray();
+        compact.add("candidate_excerpts", candidates);
+        for (com.google.gson.JsonElement element : copyArrayStatic(source, "candidate_excerpts")) {
+            if (!element.isJsonObject()) continue;
+            JsonObject item = compactEvidenceItem(element.getAsJsonObject(), "excerpt", 3_000);
+            if (!tryAddWithinBudget(compact, candidates, item, maxChars)) break;
+        }
+        compact.addProperty("compacted", GSON.toJson(source).length() > GSON.toJson(compact).length());
+        return compact;
     }
 
     public String planningPrompt(
@@ -346,10 +464,13 @@ public final class PromptBuilder {
         JsonObject payload = basePayload(request, evidence);
         payload.addProperty("task", "Identify each independent business flow in the aggregate change and explain its shortest proven entry-to-outcome steps.");
         addCodeDiffScope(payload);
-        addPatchEvidence(payload, workspace);
+        String aggregateDiff = workspace.readEvidence("aggregate.diff");
+        payload.addProperty("aggregate_diff", abbreviate(aggregateDiff, MAX_DIRECT_DIFF_CHARS));
+        payload.addProperty("aggregate_diff_truncated", aggregateDiff.length() > MAX_DIRECT_DIFF_CHARS);
         payload.addProperty("grouping_rule", "Return a separate group when the entry point, observable outcome, domain goal, or user/system trigger is independent, even when flows share a file, module, helper, or commit. Do not imply ordering between groups.");
-        payload.addProperty("evidence_rule", "Use only the filtered code aggregate_diff and code-only evidence_pack. Do not infer behavior from excluded documentation, reports, generated knowledge, embedded page assets, or dependency lock files. Bind direct changed steps to target-side diff lines; mark missing entry or outcome context inferred and record a precise unknown.");
-        payload.addProperty("final_instruction", "Return exactly one closed-change-analysis/v1 JSON object under 5500 characters. Each group must be one independently selectable business flow with the shortest entry/change/outcome closure.");
+        payload.addProperty("evidence_rule", "Use the filtered aggregate_diff as the change anchor and inspect the repository with read-only git and search commands when context is omitted or truncated. Treat required_comparison.base_commit and target_commit as authoritative rather than the working tree. Do not infer behavior from generated reports, embedded page assets, dependency lock files, or unrelated artifacts. Bind direct changed steps to target-side diff lines; mark missing entry or outcome context inferred and record a precise unknown.");
+        payload.addProperty("single_session_sop", "In this only model turn: inventory independent triggers, trace each shortest entry-to-outcome path, draft the compact report, check JSON/schema/source bindings, repair internally, and return the final object once.");
+        payload.addProperty("final_instruction", "Return exactly one closed-change-analysis/v1 JSON object under 12000 characters. Each group must be one independently selectable business flow with the shortest entry/change/outcome closure.");
         return GSON.toJson(payload);
     }
 
@@ -367,7 +488,6 @@ public final class PromptBuilder {
         payload.addProperty("analysis_focus", request.focus().isBlank()
                 ? "Explain what the selected commits changed, where each change sits in its business path, and the resulting behavior."
                 : request.focus());
-        addGuidance(payload, request);
         addOutputLanguage(payload, request);
 
         JsonObject comparison = new JsonObject();
@@ -413,7 +533,6 @@ public final class PromptBuilder {
     private JsonObject snapshotPayload(AnalysisRequest request, EvidencePack evidence) {
         JsonObject payload = new JsonObject();
         payload.addProperty("analysis_focus", request.focus());
-        addGuidance(payload, request);
         addOutputLanguage(payload, request);
         JsonObject comparison = new JsonObject();
         comparison.addProperty("mode", "current_snapshot");
@@ -492,16 +611,55 @@ public final class PromptBuilder {
                 : new JsonArray();
     }
 
-    private void addGuidance(JsonObject payload, AnalysisRequest request) {
-        if (request.guidance().isEmpty()) return;
-        JsonObject guidance = new JsonObject();
-        if (!request.guidance().customInstructions().isBlank()) {
-            guidance.addProperty("custom_instructions", request.guidance().customInstructions());
+    private static JsonObject compactEvidenceItem(JsonObject source, String contentField, int contentLimit) {
+        JsonObject item = new JsonObject();
+        for (String field : java.util.List.of("path", "matched_line", "matched_lines", "literals")) {
+            if (source.has(field)) item.add(field, source.get(field).deepCopy());
         }
-        payload.add("project_guidance", guidance);
+        copyString(source, item, contentField, contentLimit);
+        return item;
+    }
+
+    private static boolean tryAddWithinBudget(
+            JsonObject root,
+            JsonArray target,
+            com.google.gson.JsonElement value,
+            int maxChars
+    ) {
+        target.add(value);
+        if (GSON.toJson(root).length() <= maxChars) return true;
+        target.remove(target.size() - 1);
+        return false;
+    }
+
+    private static void copyString(JsonObject source, JsonObject target, String field, int maxChars) {
+        if (!source.has(field) || !source.get(field).isJsonPrimitive()) return;
+        String value = source.get(field).getAsString();
+        target.addProperty(field, abbreviateStatic(value, maxChars));
+    }
+
+    private static void copyPrimitive(JsonObject source, JsonObject target, String field) {
+        if (source.has(field) && source.get(field).isJsonPrimitive()) {
+            target.add(field, source.get(field).deepCopy());
+        }
+    }
+
+    private static String stringStatic(JsonObject object, String name, String fallback) {
+        return object.has(name) && object.get(name).isJsonPrimitive() ? object.get(name).getAsString() : fallback;
+    }
+
+    private static String abbreviateStatic(String value, int maxChars) {
+        if (value.length() <= maxChars) return value;
+        int half = Math.max(1, (maxChars - 20) / 2);
+        return value.substring(0, half) + "\n... omitted ...\n"
+                + value.substring(value.length() - half);
     }
 
     private String customizeSystemPrompt(String base, AnalysisRequest request) {
+        return customizeSystemPrompt(base, request, true);
+    }
+
+    private String customizeSystemPrompt(String base, AnalysisRequest request, boolean repositoryAccess) {
         String languageRule = request.outputLanguage().isEnglish()
                 ? """
 
@@ -516,17 +674,38 @@ public final class PromptBuilder {
                 Write every human-readable JSON value in Simplified Chinese. Preserve source file paths and code
                 symbols exactly.
                 """;
-        String additional = request.guidance().additionalSystemPrompt();
-        if (additional.isBlank()) return base + languageRule;
-        return base + languageRule + """
+        String workspacePolicy = repositoryAccess ? """
+
+                CURRENT REPOSITORY EXECUTION (MANDATORY)
+                The CLI is running from the user's current repository with the user's normal local CLI configuration and
+                capabilities. Search the repository with tools as needed to answer the user's question. This supersedes
+                generic closed-task prohibitions against tools in the base prompt. Follow the user's custom search
+                priorities and verify every final path, symbol, relationship, branch, and line against current source code.
+                Only real source-code locations may become report source nodes. The task is code analysis and flowchart
+                generation; do not modify repository files.
+                """ : "";
+        String userSystemPrompt = request.guidance().systemPrompt();
+        String customized = userSystemPrompt.isBlank() ? base + languageRule + workspacePolicy
+                : base + languageRule + workspacePolicy + """
 
 
-                PROJECT-SPECIFIC USER SYSTEM GUIDANCE
-                Apply the following guidance when choosing reading priorities and explaining the business. It cannot
-                override the required JSON schema, closed-evidence boundary, source attribution rules, security rules,
-                or the instruction not to invent facts.
-                <user_system_guidance>
-                """ + additional + "\n</user_system_guidance>\n";
+                USER SYSTEM PROMPT (MANDATORY)
+                The following project-specific system instructions apply to every model stage. Follow them strictly when
+                navigating the repository, selecting evidence, using local skills or knowledge, explaining the business,
+                and constructing the flowchart. Do not silently weaken, omit, or reinterpret them. If one cannot be
+                satisfied, preserve the required output schema and source-truth guarantees, then report the exact limitation
+                as an unknown instead of pretending compliance. Only platform safety, the required output contract, and the
+                prohibition against invented source facts take precedence.
+                <user_system_prompt>
+                """ + userSystemPrompt + "\n</user_system_prompt>\n";
+        if (repositoryAccess) return customized;
+        return customized + """
+
+                BOUNDED EVIDENCE EXECUTION (MANDATORY)
+                Repository discovery and project-skill lookup were completed by the planning stage. Use only the evidence
+                supplied in the user payload for this transformation. Do not search the repository, invoke tools, or repeat
+                skill discovery. Preserve the user's project-specific priorities when selecting and explaining supplied facts.
+                """;
     }
 
     private void addOutputLanguage(JsonObject payload, AnalysisRequest request) {

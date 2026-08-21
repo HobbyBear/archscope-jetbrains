@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.archscope"
-version = "0.7.9"
+version = "0.7.11"
 
 dependencies {
     intellijPlatform {
@@ -46,11 +46,14 @@ tasks {
             "archscope.previewInput",
             "archscope.previewOutput",
             "archscope.previewDark",
+            "archscope.functionPreviewInput",
+            "archscope.functionPreviewOutput",
             "archscope.domainBenchmarkRepo",
             "archscope.domainBenchmarkPrompt",
             "archscope.domainBenchmarkLanguage",
             "archscope.domainBenchmarkOutput",
             "archscope.domainBenchmarkHtmlOutput",
+            "archscope.domainCliWorkingDirectory",
             "archscope.domainCustomPrompt",
             "archscope.domainBusinessContext",
             "archscope.domainCodeReadingPrompt",
@@ -59,7 +62,9 @@ tasks {
             "archscope.domainRefineInput",
             "archscope.domainRefineOutput",
             "archscope.domainRefineHtmlOutput",
-            "archscope.modelProvider"
+            "archscope.modelProvider",
+            "archscope.liveFunctionRepository",
+            "archscope.modelAuditDir"
         )) {
             System.getProperty(name)?.let { systemProperty(name, it) }
         }
@@ -77,8 +82,8 @@ intellijPlatform {
         name = "CodeBecause"
         version = project.version.toString()
         description = """
-            Analyze selected Git changes or a user-defined business topic with a configurable
-            model provider, then refine evidence-backed business-flow reports interactively.
+            Analyze a user-defined business topic with a configurable local CLI provider,
+            then refine evidence-backed business-flow reports interactively.
         """.trimIndent()
 
         ideaVersion {
@@ -87,6 +92,8 @@ intellijPlatform {
 
         vendor {
             name = "CodeBecause"
+            email = "18881934641@163.com"
+            url = "https://github.com/HobbyBear/archscope-jetbrains"
         }
     }
 

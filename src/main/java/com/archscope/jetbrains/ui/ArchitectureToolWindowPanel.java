@@ -20,11 +20,13 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
-import com.intellij.openapi.util.Key;
+import com.intellij.openapi.ui.TextFieldWithBrowseButton;
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.vfs.VirtualFileWrapper;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.ui.ColoredListCellRenderer;
+import com.intellij.ui.SearchTextField;
 import com.intellij.ui.SimpleTextAttributes;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBList;
@@ -59,14 +61,16 @@ import java.awt.event.MouseEvent;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.stream.IntStream;
 
 final class ArchitectureToolWindowPanel implements Disposable {
-    private static final Key<ArchitectureToolWindowPanel> PANEL_KEY =
-            Key.create("ai.code.review.tool.window.panel");
     private static final DateTimeFormatter HISTORY_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
             .withZone(ZoneId.systemDefault());
 
@@ -78,9 +82,12 @@ final class ArchitectureToolWindowPanel implements Disposable {
     private final JBLabel targetSnapshot = new JBLabel("");
     private final JBTextArea focus = new JBTextArea(4, 60);
     private final JPanel selectionPanel = new JPanel(new BorderLayout());
-    private final JBLabel status = new JBLabel(PluginText.text("等待 Git 日志选择", "Waiting for a Git log selection"));
+    private final JBLabel status = new JBLabel(PluginText.text("等待新建分析", "Ready for a new analysis"));
     private final JProgressBar progress = new JProgressBar();
     private final JButton analyze = new JButton(PluginText.text("重新分析当前选择", "Analyze current selection"));
+    private final JButton showLiveAnalysis = new JButton(PluginText.text("查看实时过程", "Show live output"));
+    private final JPanel liveAnalysisBar = new JPanel(new BorderLayout(8, 0));
+    private final JBLabel liveAnalysisLabel = new JBLabel();
     private final JButton openReport = new JButton(PluginText.text("全局查看", "Open report"));
     private final JButton exportHtml = new JButton(PluginText.text("导出 HTML", "Export HTML"));
     private final JButton exportJson = new JButton(PluginText.text("导出 JSON", "Export JSON"));
@@ -90,18 +97,22 @@ final class ArchitectureToolWindowPanel implements Disposable {
     private final ReportArchive reportArchive = new ReportArchive();
     private final DefaultListModel<ReportArchive.Entry> historyModel = new DefaultListModel<>();
     private final JBList<ReportArchive.Entry> historyList = new JBList<>(historyModel);
+    private final SearchTextField historySearch = new SearchTextField(false);
     private final JBLabel historyStatus = new JBLabel(PluginText.text("正在读取本地报告...", "Loading local reports..."));
     private final JButton openHistory = new JButton(PluginText.text("打开报告", "Open report"));
-    private final JButton deleteHistory = new JButton(PluginText.text("删除", "Delete"));
+    private final JButton deleteHistory = new JButton(PluginText.text("删除所选", "Delete selected"));
+    private final JButton selectAllHistory = new JButton(PluginText.text("全选", "Select all"));
     private final JButton refreshHistory = new JButton(PluginText.text("刷新", "Refresh"));
+    private final JToggleButton allHistory = new JToggleButton(PluginText.text("全部", "All"));
+    private final JToggleButton functionHistory = new JToggleButton(PluginText.text("函数流程", "Functions"));
+    private final JToggleButton businessHistory = new JToggleButton(PluginText.text("业务分析", "Business"));
     private final JBTabbedPane navigation = new JBTabbedPane();
-    private final JBTextArea customPrompt = new JBTextArea(8, 60);
-    private final JBTextArea systemPrompt = new JBTextArea(5, 60);
-    private final JToggleButton advancedPromptSettings = new JToggleButton(PluginText.text("高级设置", "Advanced settings"));
-    private final JButton savePrompts = new JButton(PluginText.text("保存自定义提示词", "Save custom instructions"));
+    private final JBTextArea systemPrompt = new JBTextArea(14, 60);
+    private final JButton savePrompts = new JButton(PluginText.text("保存 System Prompt", "Save System Prompt"));
     private final JToggleButton codexProvider = new JToggleButton(PluginText.text("本机 Codex", "Local Codex"));
     private final JToggleButton claudeProvider = new JToggleButton("Claude CLI");
     private final JButton saveModelProvider = new JButton(PluginText.text("保存模型配置", "Save model settings"));
+    private final TextFieldWithBrowseButton cliWorkingDirectory = new TextFieldWithBrowseButton();
     private final JComboBox<String> outputLanguage = new JComboBox<>(new String[]{
             PluginText.text("中文（简体）", "Chinese (Simplified)"), "English"
     });
@@ -109,6 +120,7 @@ final class ArchitectureToolWindowPanel implements Disposable {
     private final ProjectAnalysisGuidanceStore guidanceStore;
     private final ModelProviderStore modelProviderStore;
     private final OutputLanguageStore outputLanguageStore;
+    private final CliWorkingDirectoryStore cliWorkingDirectoryStore;
 
     private Path repositoryRoot;
     private List<CommitInfo> selectedCommits = List.of();
@@ -119,7 +131,9 @@ final class ArchitectureToolWindowPanel implements Disposable {
     private AnalysisRequest lastRequest;
     private EvidencePack lastEvidence;
     private boolean busy;
+    private int activeOperations;
     private boolean historyLoading;
+    private List<ReportArchive.Entry> historyEntries = List.of();
     private long historyReloadGeneration;
 
     ArchitectureToolWindowPanel(Project project) {
@@ -127,51 +141,20 @@ final class ArchitectureToolWindowPanel implements Disposable {
         this.guidanceStore = new ProjectAnalysisGuidanceStore(project);
         this.modelProviderStore = new ModelProviderStore(project);
         this.outputLanguageStore = new OutputLanguageStore(project);
+        this.cliWorkingDirectoryStore = new CliWorkingDirectoryStore(project);
         this.outputLanguageStore.load();
-        project.putUserData(PANEL_KEY, this);
         if (project.getBasePath() != null) repositoryRoot = Path.of(project.getBasePath());
+        cliWorkingDirectory.setText(cliWorkingDirectoryStore.load(repositoryRoot));
+        project.getMessageBus().connect(this).subscribe(ReportHistoryListener.TOPIC, changedRoot -> {
+            if (repositoryRoot != null && repositoryRoot.toAbsolutePath().normalize()
+                    .equals(changedRoot.toAbsolutePath().normalize())) reloadReportHistory(false);
+        });
+        project.getMessageBus().connect(this).subscribe(AnalysisRunListener.TOPIC, () ->
+                ApplicationManager.getApplication().invokeLater(this::updateLiveAnalysisAction));
         buildUi();
         loadPromptInputs();
         renderSelection();
         reloadReportHistory(false);
-    }
-
-    static void analyzeGitLogSelection(
-            Project project,
-            Path repositoryRoot,
-            List<CommitInfo> commits,
-            String targetCommit
-    ) {
-        ToolWindow toolWindow = ToolWindowManager.getInstance(project)
-                .getToolWindow("CodeBecause");
-        if (toolWindow == null) {
-            Messages.showErrorDialog(project, PluginText.text("无法打开 AI Code Review 工具窗口。",
-                    "Could not open the CodeBecause tool window."), "CodeBecause");
-            return;
-        }
-        toolWindow.show(() -> runWhenPanelReady(project, repositoryRoot, commits, targetCommit, 0));
-    }
-
-    private static void runWhenPanelReady(
-            Project project,
-            Path repositoryRoot,
-            List<CommitInfo> commits,
-            String targetCommit,
-            int attempt
-    ) {
-        ArchitectureToolWindowPanel panel = project.getUserData(PANEL_KEY);
-        if (panel != null) {
-            panel.startSelection(repositoryRoot, commits, targetCommit);
-            return;
-        }
-        if (attempt >= 2) {
-            Messages.showErrorDialog(project, PluginText.text("AI Code Review 工具窗口尚未初始化。",
-                    "The CodeBecause tool window is not initialized yet."), "CodeBecause");
-            return;
-        }
-        ApplicationManager.getApplication().invokeLater(
-                () -> runWhenPanelReady(project, repositoryRoot, commits, targetCommit, attempt + 1)
-        );
     }
 
     JComponent component() {
@@ -199,7 +182,19 @@ final class ArchitectureToolWindowPanel implements Disposable {
 
         selectionPanel.setBorder(JBUI.Borders.empty(8, 10));
         selectionPanel.add(selectionHeader, BorderLayout.NORTH);
-        selectionPanel.add(new JBScrollPane(selectedCommitList), BorderLayout.CENTER);
+        JPanel workingDirectoryPanel = new JPanel(new BorderLayout(8, 0));
+        workingDirectoryPanel.add(new JBLabel(PluginText.text("工作目录", "Working directory")), BorderLayout.WEST);
+        cliWorkingDirectory.addBrowseFolderListener(
+                PluginText.text("选择分析工作目录", "Select analysis working directory"),
+                PluginText.text("Codex 或 Claude CLI 将从这个目录运行。", "Codex or Claude CLI runs from this directory."),
+                project,
+                FileChooserDescriptorFactory.createSingleFolderDescriptor()
+        );
+        cliWorkingDirectory.setToolTipText(PluginText.text(
+                "默认使用当前仓库目录；可在本次分析前更换",
+                "Defaults to the current repository; change it before running this analysis"));
+        workingDirectoryPanel.add(cliWorkingDirectory, BorderLayout.CENTER);
+        selectionPanel.add(workingDirectoryPanel, BorderLayout.CENTER);
 
         focus.setLineWrap(true);
         focus.setWrapStyleWord(true);
@@ -208,15 +203,6 @@ final class ArchitectureToolWindowPanel implements Disposable {
         focusPanel.setBorder(JBUI.Borders.empty(8, 10));
         JPanel focusHeader = new JPanel(new BorderLayout(8, 0));
         focusHeader.add(new JBLabel(PluginText.text("分析主题", "Analysis topic")), BorderLayout.WEST);
-        JPanel modes = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
-        ButtonGroup modeGroup = new ButtonGroup();
-        modeGroup.add(businessMode);
-        modeGroup.add(changeMode);
-        businessMode.setSelected(true);
-        changeMode.setEnabled(false);
-        modes.add(businessMode);
-        modes.add(changeMode);
-        focusHeader.add(modes, BorderLayout.EAST);
         focusPanel.add(focusHeader, BorderLayout.NORTH);
         focusPanel.add(new JBScrollPane(focus), BorderLayout.CENTER);
         focusPanel.add(new JBLabel(PluginText.text(
@@ -252,10 +238,19 @@ final class ArchitectureToolWindowPanel implements Disposable {
         analysisContent.add(runBar, BorderLayout.SOUTH);
         navigation.addTab(PluginText.text("历史报告", "Report history"), buildHistoryPanel());
         navigation.addTab(PluginText.text("新建分析", "New analysis"), analysisContent);
-        navigation.addTab(PluginText.text("自定义提示词", "Custom instructions"), buildPromptPanel());
+        navigation.addTab("System Prompt", buildPromptPanel());
         navigation.addTab(PluginText.text("模型配置", "Model settings"), buildModelPanel());
         navigation.setSelectedIndex(0);
         root.add(navigation, BorderLayout.CENTER);
+        liveAnalysisBar.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 0, 0,
+                        JBUI.CurrentTheme.CustomFrameDecorations.separatorForeground()),
+                JBUI.Borders.empty(7, 10)
+        ));
+        liveAnalysisBar.add(liveAnalysisLabel, BorderLayout.CENTER);
+        liveAnalysisBar.add(showLiveAnalysis, BorderLayout.EAST);
+        liveAnalysisBar.setVisible(false);
+        root.add(liveAnalysisBar, BorderLayout.SOUTH);
 
         analyze.addActionListener(event -> collectEvidence());
         openReport.addActionListener(event -> openReportInEditor(false));
@@ -265,7 +260,9 @@ final class ArchitectureToolWindowPanel implements Disposable {
         changeMode.addActionListener(event -> switchMode(AnalysisRequest.Mode.SELECTED_CHANGES));
         openHistory.addActionListener(event -> openSelectedArchivedReport());
         deleteHistory.addActionListener(event -> deleteSelectedArchivedReport());
+        selectAllHistory.addActionListener(event -> toggleAllVisibleHistory());
         refreshHistory.addActionListener(event -> reloadReportHistory(true));
+        showLiveAnalysis.addActionListener(event -> FunctionAnalysisRunRegistry.showActive(project, showLiveAnalysis));
         savePrompts.addActionListener(event -> savePromptInputs());
         saveModelProvider.addActionListener(event -> saveModelProvider());
         focus.getDocument().addDocumentListener(new DocumentListener() {
@@ -284,23 +281,55 @@ final class ArchitectureToolWindowPanel implements Disposable {
                 updateActions();
             }
         });
+        cliWorkingDirectory.getTextField().getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                saveCliWorkingDirectory();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                saveCliWorkingDirectory();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                saveCliWorkingDirectory();
+            }
+        });
         updateActions();
         openReport.setEnabled(false);
         exportHtml.setEnabled(false);
         exportJson.setEnabled(false);
+        updateLiveAnalysisAction();
     }
 
     private JComponent buildHistoryPanel() {
         JPanel panel = new JPanel(new BorderLayout(0, 8));
         panel.setBorder(JBUI.Borders.empty(10));
+        JPanel controls = new JPanel(new BorderLayout(0, 8));
         JPanel header = new JPanel(new BorderLayout(8, 0));
         JBLabel title = new JBLabel(PluginText.text("本项目的历史分析", "Analysis history for this project"));
         title.setFont(title.getFont().deriveFont(Font.BOLD));
         header.add(title, BorderLayout.WEST);
         header.add(refreshHistory, BorderLayout.EAST);
-        panel.add(header, BorderLayout.NORTH);
+        controls.add(header, BorderLayout.NORTH);
+        historySearch.getTextEditor().getEmptyText().setText(PluginText.text(
+                "搜索函数名、文件路径或报告标题", "Search function, file, or report title"));
+        controls.add(historySearch, BorderLayout.CENTER);
+        JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        ButtonGroup historyTypes = new ButtonGroup();
+        historyTypes.add(allHistory);
+        historyTypes.add(functionHistory);
+        historyTypes.add(businessHistory);
+        allHistory.setSelected(true);
+        filters.add(allHistory);
+        filters.add(functionHistory);
+        filters.add(businessHistory);
+        controls.add(filters, BorderLayout.SOUTH);
+        panel.add(controls, BorderLayout.NORTH);
 
-        historyList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        historyList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         historyList.setVisibleRowCount(12);
         historyList.getEmptyText().setText(PluginText.text("当前项目还没有本地历史报告", "This project has no local reports yet"));
         historyList.setCellRenderer(new ColoredListCellRenderer<>() {
@@ -312,9 +341,14 @@ final class ArchitectureToolWindowPanel implements Disposable {
                     boolean selected,
                     boolean hasFocus
             ) {
-                String focusText = entry.focus().isBlank() ? PluginText.text("未命名分析", "Untitled analysis") : entry.focus();
+                String focusText = entry.mode() == AnalysisRequest.Mode.FUNCTION_FLOW && !entry.functionSymbol().isBlank()
+                        ? entry.functionSymbol()
+                        : !entry.title().isBlank() ? entry.title()
+                        : entry.focus().isBlank() ? PluginText.text("未命名分析", "Untitled analysis") : entry.focus();
                 append(focusText, SimpleTextAttributes.REGULAR_ATTRIBUTES);
-                append("  " + HISTORY_TIME.format(entry.createdAt())
+                String source = entry.mode() == AnalysisRequest.Mode.FUNCTION_FLOW && !entry.functionFile().isBlank()
+                        ? " · " + entry.functionFile() : "";
+                append(source + "  " + HISTORY_TIME.format(entry.createdAt())
                                 + " · " + modeName(entry.mode())
                                 + " · " + formatElapsed(entry.elapsedMs())
                                 + " · " + shortHash(entry.targetCommit()),
@@ -333,18 +367,40 @@ final class ArchitectureToolWindowPanel implements Disposable {
             @Override
             public void keyPressed(KeyEvent event) {
                 if (event.getKeyCode() == KeyEvent.VK_ENTER) openSelectedArchivedReport();
+                else if (event.getKeyCode() == KeyEvent.VK_DELETE) deleteSelectedArchivedReport();
             }
         });
+        historySearch.getTextEditor().getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                applyHistoryFilter();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                applyHistoryFilter();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                applyHistoryFilter();
+            }
+        });
+        allHistory.addActionListener(event -> applyHistoryFilter());
+        functionHistory.addActionListener(event -> applyHistoryFilter());
+        businessHistory.addActionListener(event -> applyHistoryFilter());
         panel.add(new JBScrollPane(historyList), BorderLayout.CENTER);
 
         JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.add(historyStatus, BorderLayout.CENTER);
         JPanel historyActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        historyActions.add(selectAllHistory);
         historyActions.add(deleteHistory);
         historyActions.add(openHistory);
         footer.add(historyActions, BorderLayout.EAST);
         openHistory.setEnabled(false);
         deleteHistory.setEnabled(false);
+        selectAllHistory.setEnabled(false);
         panel.add(footer, BorderLayout.SOUTH);
         return panel;
     }
@@ -353,37 +409,9 @@ final class ArchitectureToolWindowPanel implements Disposable {
         JPanel form = new JPanel(new GridBagLayout());
         form.setBorder(JBUI.Borders.empty(10));
         int row = 0;
-        row = addPromptField(form, row, PluginText.text("自定义提示词", "Custom instructions"), customPrompt,
-                PluginText.text("例如：创作者数据由 OMS 导入；沿入口、数据来源、状态变化、落库和消费者展开。",
-                        "For example: creator data is imported from OMS; follow its entry, origin, state changes, persistence, and consumers."));
-
-        JPanel advancedPanel = new JPanel(new BorderLayout(0, 4));
-        advancedPanel.add(new JBLabel(PluginText.text("附加系统提示词", "Additional system instructions")), BorderLayout.NORTH);
-        systemPrompt.setLineWrap(true);
-        systemPrompt.setWrapStyleWord(true);
-        systemPrompt.getEmptyText().setText(PluginText.text("仅用于需要影响所有分析阶段的高级约束。",
-                "Use only for advanced constraints that must apply to every analysis stage."));
-        advancedPanel.add(new JBScrollPane(systemPrompt), BorderLayout.CENTER);
-        advancedPanel.setVisible(false);
-
-        JPanel advancedActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        advancedActions.add(advancedPromptSettings);
-        GridBagConstraints advancedAction = constraints(row++, 0, 2, 1.0, 0.0);
-        advancedAction.insets = new Insets(10, 0, 0, 0);
-        form.add(advancedActions, advancedAction);
-        GridBagConstraints advanced = constraints(row++, 0, 2, 1.0, 0.35);
-        advanced.insets = new Insets(6, 0, 0, 0);
-        advanced.fill = GridBagConstraints.BOTH;
-        form.add(advancedPanel, advanced);
-        advancedPromptSettings.addActionListener(event -> {
-            boolean visible = advancedPromptSettings.isSelected();
-            advancedPromptSettings.setText(visible
-                    ? PluginText.text("收起高级设置", "Hide advanced settings")
-                    : PluginText.text("高级设置", "Advanced settings"));
-            advancedPanel.setVisible(visible);
-            form.revalidate();
-            form.repaint();
-        });
+        row = addPromptField(form, row, "System Prompt", systemPrompt,
+                PluginText.text("项目级系统指令。每个模型阶段都会严格遵守，用于定义代码导航、知识来源和业务分析要求。",
+                        "Project-level system instructions. Every model stage follows them for navigation, knowledge sources, and analysis rules."));
 
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
         actions.add(savePrompts);
@@ -459,27 +487,6 @@ final class ArchitectureToolWindowPanel implements Disposable {
         return value;
     }
 
-    private void startSelection(Path rootPath, List<CommitInfo> commits, String targetHash) {
-        if (busy) {
-            Messages.showWarningDialog(project,
-                    PluginText.text("已有一项提交分析正在运行，请等待当前分析完成。",
-                            "An analysis is already running. Wait for it to finish."),
-                    PluginText.text("分析正在运行", "Analysis in progress"));
-            return;
-        }
-        repositoryRoot = rootPath;
-        selectedCommits = List.copyOf(commits);
-        targetCommit = targetHash;
-        analysisMode = AnalysisRequest.Mode.SELECTED_CHANGES;
-        changeMode.setEnabled(true);
-        changeMode.setSelected(true);
-        if (focus.getText().isBlank()) focus.setText(defaultFocus());
-        navigation.setSelectedIndex(1);
-        reloadReportHistory(false);
-        renderSelection();
-        collectEvidence();
-    }
-
     private void renderSelection() {
         selectedCommitModel.clear();
         if (analysisMode == AnalysisRequest.Mode.BUSINESS_DOMAIN) {
@@ -529,12 +536,16 @@ final class ArchitectureToolWindowPanel implements Disposable {
         savePromptInputs(false);
         AnalysisGuidance guidance = guidanceStore.load(repositoryRoot);
         AnalysisRequest.OutputLanguage language = outputLanguageStore.load();
-        AnalysisRequest request = analysisMode == AnalysisRequest.Mode.BUSINESS_DOMAIN
+        Path configuredWorkingDirectory = resolveCliWorkingDirectory();
+        if (!cliWorkingDirectory.getText().isBlank() && configuredWorkingDirectory == null) return;
+        cliWorkingDirectory.setText(configuredWorkingDirectory.toString());
+        cliWorkingDirectoryStore.save(configuredWorkingDirectory.toString());
+        AnalysisRequest request = (analysisMode == AnalysisRequest.Mode.BUSINESS_DOMAIN
                 ? AnalysisRequest.businessDomain(repositoryRoot, analysisFocus, guidance, language)
                 : new AnalysisRequest(
                         repositoryRoot, selectedCommits, targetCommit, analysisFocus,
                         AnalysisRequest.Mode.SELECTED_CHANGES, guidance, language
-                );
+                )).withCliWorkingDirectory(configuredWorkingDirectory);
         setBusy(true, PluginText.text("正在锁定所选提交并收集证据...", "Locking the selected commits and collecting evidence..."));
         new Task.Backgroundable(project, PluginText.text("收集 Git 架构证据", "Collect Git architecture evidence"), true) {
             private EvidencePack evidence;
@@ -576,6 +587,8 @@ final class ArchitectureToolWindowPanel implements Disposable {
         ArchitectureAnalysisService analysisService = new ArchitectureAnalysisService(
                 ModelClientRegistry.selected(modelProviderStore.load())
         );
+        FunctionAnalysisRunDialog runDialog = new FunctionAnalysisRunDialog(project, request.focus());
+        runDialog.show();
         setBusy(true, PluginText.text("正在调用模型并校验架构报告...", "Calling the model and validating the report..."));
         new Task.Backgroundable(project, PluginText.text("生成代码审核与架构报告", "Generate code review and architecture report"), true) {
             private AnalysisResult result;
@@ -583,10 +596,14 @@ final class ArchitectureToolWindowPanel implements Disposable {
 
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
+                runDialog.attach(indicator);
                 try {
                     result = analysisService.analyze(request, evidence, indicator, message ->
-                            ApplicationManager.getApplication().invokeLater(() -> status.setText(PluginText.userMessage(message)))
-                    );
+                                    ApplicationManager.getApplication().invokeLater(() -> {
+                                        status.setText(PluginText.userMessage(message));
+                                        runDialog.updateStatus(message);
+                                    }),
+                            runDialog::accept);
                     try {
                         reportArchive.save(request.repositoryRoot(), request, result);
                     } catch (IOException exception) {
@@ -599,6 +616,8 @@ final class ArchitectureToolWindowPanel implements Disposable {
 
             @Override
             public void onSuccess() {
+                runDialog.completed(PluginText.text(
+                        "分析完成，报告已生成。", "Analysis completed; the report was generated."));
                 lastResult = result;
                 lastRequest = request;
                 lastEvidence = evidence;
@@ -609,17 +628,22 @@ final class ArchitectureToolWindowPanel implements Disposable {
                         ? PluginText.text("报告已生成并保存 · ", "Report generated and saved · ") + shortHash(result.targetCommit())
                         : PluginText.text("报告已生成，但本地保存失败 · ", "Report generated, but local save failed · ") + archiveWarning);
                 reloadReportHistory(false);
-                openReportInEditor(true);
+                openCompletedReport(request, evidence, result);
             }
 
             @Override
             public void onThrowable(@NotNull Throwable error) {
+                Throwable cause = rootCause(error);
+                runDialog.failed(cause.getMessage() == null
+                        ? PluginText.text("分析失败，已保留执行过程。", "Analysis failed; execution details were preserved.")
+                        : PluginText.userMessage(cause.getMessage()));
                 setBusy(false, PluginText.text("报告生成失败", "Report generation failed"));
                 showError(error);
             }
 
             @Override
             public void onCancel() {
+                runDialog.cancelled();
                 setBusy(false, PluginText.text("已取消模型分析", "Model analysis canceled"));
             }
         }.queue();
@@ -642,12 +666,20 @@ final class ArchitectureToolWindowPanel implements Disposable {
         if (toolWindow != null && toolWindow.isVisible()) toolWindow.hide();
     }
 
+    private void openCompletedReport(AnalysisRequest request, EvidencePack evidence, AnalysisResult result) {
+        ArchitectureReportVirtualFile completed = new ArchitectureReportVirtualFile(
+                result, request.repositoryRoot(), request, evidence);
+        reportFile = completed;
+        FileEditorManager.getInstance(project).openFile(completed, true);
+    }
+
     private void reloadReportHistory(boolean announce) {
         long generation = ++historyReloadGeneration;
         Path currentRoot = repositoryRoot;
         AnalysisRequest.OutputLanguage visibleLanguage = outputLanguageStore.load();
         if (currentRoot == null) {
             historyLoading = false;
+            historyEntries = List.of();
             historyModel.clear();
             historyStatus.setText(PluginText.text("当前项目没有可用路径", "The current project has no usable path"));
             updateHistoryActions();
@@ -664,12 +696,8 @@ final class ArchitectureToolWindowPanel implements Disposable {
                 ApplicationManager.getApplication().invokeLater(() -> {
                     if (generation != historyReloadGeneration || !currentRoot.equals(repositoryRoot)) return;
                     historyLoading = false;
-                    historyModel.clear();
-                    entries.forEach(historyModel::addElement);
-                    if (!entries.isEmpty()) historyList.setSelectedIndex(0);
-                    historyStatus.setText(entries.isEmpty()
-                            ? PluginText.text("当前项目还没有本地历史报告", "This project has no local reports yet")
-                            : PluginText.text("共 ", "") + entries.size() + PluginText.text(" 份本地报告", " local reports"));
+                    historyEntries = entries;
+                    applyHistoryFilter();
                     if (announce) status.setText(PluginText.text("历史报告列表已刷新", "Report history refreshed"));
                     updateHistoryActions();
                 });
@@ -686,22 +714,66 @@ final class ArchitectureToolWindowPanel implements Disposable {
         });
     }
 
+    private void applyHistoryFilter() {
+        Set<String> selectedIds = historyList.getSelectedValuesList().stream()
+                .map(ReportArchive.Entry::id)
+                .collect(java.util.stream.Collectors.toSet());
+        String query = historySearch.getText().strip().toLowerCase(Locale.ROOT);
+        List<ReportArchive.Entry> visible = historyEntries.stream()
+                .filter(entry -> !functionHistory.isSelected() || entry.mode() == AnalysisRequest.Mode.FUNCTION_FLOW)
+                .filter(entry -> !businessHistory.isSelected() || entry.mode() == AnalysisRequest.Mode.BUSINESS_DOMAIN)
+                .filter(entry -> matchesHistory(entry, query))
+                .toList();
+        historyModel.clear();
+        visible.forEach(historyModel::addElement);
+        int[] selectedIndices = IntStream.range(0, historyModel.size())
+                .filter(index -> selectedIds.contains(historyModel.get(index).id()))
+                .toArray();
+        if (selectedIndices.length > 0) historyList.setSelectedIndices(selectedIndices);
+        else if (!visible.isEmpty()) historyList.setSelectedIndex(0);
+        boolean filtered = !query.isBlank() || !allHistory.isSelected();
+        historyList.getEmptyText().setText(filtered
+                ? PluginText.text("没有匹配的历史报告", "No matching reports")
+                : PluginText.text("当前项目还没有本地历史报告", "This project has no local reports yet"));
+        historyStatus.setText(historyEntries.isEmpty()
+                ? PluginText.text("当前项目还没有本地历史报告", "This project has no local reports yet")
+                : filtered
+                ? PluginText.text("显示 ", "Showing ") + visible.size() + " / " + historyEntries.size()
+                : PluginText.text("共 ", "") + historyEntries.size() + PluginText.text(" 份本地报告", " local reports"));
+        updateHistoryActions();
+    }
+
+    static boolean matchesHistory(ReportArchive.Entry entry, String query) {
+        if (query == null || query.isBlank()) return true;
+        String searchable = String.join(" ", entry.focus(), entry.title(), entry.functionSymbol(),
+                entry.functionFile(), entry.targetCommit()).toLowerCase(Locale.ROOT);
+        for (String token : query.strip().toLowerCase(Locale.ROOT).split("\\s+")) {
+            if (!searchable.contains(token)) return false;
+        }
+        return true;
+    }
+
     private void openSelectedArchivedReport() {
         if (busy || historyLoading) return;
-        ReportArchive.Entry selected = historyList.getSelectedValue();
-        if (selected != null) openArchivedReport(selected);
+        List<ReportArchive.Entry> selected = historyList.getSelectedValuesList();
+        if (selected.size() == 1) openArchivedReport(selected.get(0));
     }
 
     private void deleteSelectedArchivedReport() {
         if (busy || historyLoading) return;
-        ReportArchive.Entry selected = historyList.getSelectedValue();
-        if (selected == null) return;
-        String reportName = selected.focus().isBlank() ? PluginText.text("未命名分析", "Untitled analysis") : selected.focus();
+        List<ReportArchive.Entry> selected = List.copyOf(historyList.getSelectedValuesList());
+        if (selected.isEmpty()) return;
+        String reportName = selected.get(0).focus().isBlank()
+                ? PluginText.text("未命名分析", "Untitled analysis") : selected.get(0).focus();
+        String message = selected.size() == 1
+                ? PluginText.text("确定删除本地报告“" + reportName + "”吗？此操作无法撤销。",
+                "Delete the local report \"" + reportName + "\"? This cannot be undone.")
+                : PluginText.text("确定删除选中的 " + selected.size() + " 份本地报告吗？此操作无法撤销。",
+                "Delete the " + selected.size() + " selected local reports? This cannot be undone.");
         int answer = Messages.showYesNoDialog(
                 project,
-                PluginText.text("确定删除本地报告“" + reportName + "”吗？此操作无法撤销。",
-                        "Delete the local report \"" + reportName + "\"? This cannot be undone."),
-                PluginText.text("删除历史报告", "Delete report"),
+                message,
+                PluginText.text("删除历史报告", "Delete reports"),
                 Messages.getWarningIcon()
         );
         if (answer != Messages.YES) return;
@@ -711,11 +783,12 @@ final class ArchitectureToolWindowPanel implements Disposable {
         updateHistoryActions();
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
             try {
-                reportArchive.delete(selected);
+                reportArchive.deleteAll(selected);
                 ApplicationManager.getApplication().invokeLater(() -> {
                     historyLoading = false;
-                    historyModel.removeElement(selected);
-                    status.setText(PluginText.text("本地报告已删除", "Local report deleted"));
+                    selected.forEach(historyModel::removeElement);
+                    status.setText(PluginText.text("已删除 " + selected.size() + " 份本地报告",
+                            "Deleted " + selected.size() + " local report(s)"));
                     reloadReportHistory(false);
                 });
             } catch (IOException exception) {
@@ -730,6 +803,13 @@ final class ArchitectureToolWindowPanel implements Disposable {
         });
     }
 
+    private void toggleAllVisibleHistory() {
+        if (busy || historyLoading || historyModel.isEmpty()) return;
+        if (historyList.getSelectedIndices().length == historyModel.size()) historyList.clearSelection();
+        else historyList.setSelectionInterval(0, historyModel.size() - 1);
+        updateHistoryActions();
+    }
+
     private void openArchivedReport(ReportArchive.Entry entry) {
         historyLoading = true;
         status.setText(PluginText.text("正在打开本地报告...", "Opening local report..."));
@@ -742,11 +822,22 @@ final class ArchitectureToolWindowPanel implements Disposable {
                     historyLoading = false;
                     repositoryRoot = entry.repositoryRoot();
                     lastResult = archived;
-                    lastRequest = entry.mode() == AnalysisRequest.Mode.BUSINESS_DOMAIN
-                            ? AnalysisRequest.businessDomain(
-                                    entry.repositoryRoot(), entry.focus(), guidanceStore.load(entry.repositoryRoot()),
-                                    entry.outputLanguage())
-                            : null;
+                    AnalysisRequest archivedRequest;
+                    if (entry.mode() == AnalysisRequest.Mode.BUSINESS_DOMAIN) {
+                        archivedRequest = AnalysisRequest.businessDomain(
+                                entry.repositoryRoot(), entry.focus(), guidanceStore.load(entry.repositoryRoot()),
+                                entry.outputLanguage());
+                    } else if (entry.mode() == AnalysisRequest.Mode.FUNCTION_FLOW) {
+                        archivedRequest = AnalysisRequest.functionFlow(
+                                entry.repositoryRoot(),
+                                FunctionReportSupport.target(archived.reportJson(), entry.repositoryRoot()),
+                                guidanceStore.load(entry.repositoryRoot()),
+                                entry.outputLanguage());
+                    } else {
+                        archivedRequest = null;
+                    }
+                    Path archivedWorkingDirectory = configuredCliWorkingDirectory(entry.repositoryRoot());
+                    lastRequest = archivedRequest == null ? null : archivedRequest.withCliWorkingDirectory(archivedWorkingDirectory);
                     lastEvidence = null;
                     openReportInEditor(true);
                     status.setText(PluginText.text("已打开本地报告 · ", "Opened local report · ") + HISTORY_TIME.format(entry.createdAt()));
@@ -766,8 +857,7 @@ final class ArchitectureToolWindowPanel implements Disposable {
 
     private void loadPromptInputs() {
         AnalysisGuidance guidance = guidanceStore.load(repositoryRoot);
-        customPrompt.setText(guidance.customInstructions());
-        systemPrompt.setText(guidance.additionalSystemPrompt());
+        systemPrompt.setText(guidance.systemPrompt());
     }
 
     private void savePromptInputs() {
@@ -775,12 +865,9 @@ final class ArchitectureToolWindowPanel implements Disposable {
     }
 
     private void savePromptInputs(boolean announce) {
-        guidanceStore.save(
-                customPrompt.getText().strip(),
-                systemPrompt.getText().strip()
-        );
-        if (announce) status.setText(PluginText.text("自定义提示词已保存，下一次分析生效",
-                "Custom instructions saved; they apply to the next analysis"));
+        guidanceStore.save(systemPrompt.getText().strip());
+        if (announce) status.setText(PluginText.text("System Prompt 已保存，下一次分析生效",
+                "System Prompt saved; it applies to the next analysis"));
     }
 
     private void loadModelProvider() {
@@ -808,6 +895,46 @@ final class ArchitectureToolWindowPanel implements Disposable {
         status.setText(PluginText.text("插件语言已立即更新；模型选择将用于下一次分析",
                 "Plugin language updated immediately; the model selection applies to the next analysis"));
         reloadReportHistory(false);
+    }
+
+    private Path resolveCliWorkingDirectory() {
+        String configured = cliWorkingDirectory.getText().strip();
+        Path resolved = null;
+        try {
+            if (!configured.isBlank()) {
+                Path candidate = Path.of(configured);
+                if (!candidate.isAbsolute() && repositoryRoot != null) candidate = repositoryRoot.resolve(candidate);
+                candidate = candidate.toAbsolutePath().normalize();
+                if (Files.isDirectory(candidate)) resolved = candidate;
+            }
+        } catch (InvalidPathException ignored) {
+            // The validation message below is shared with missing directories.
+        }
+        if (!configured.isBlank() && resolved == null) {
+            Messages.showWarningDialog(project,
+                    PluginText.text("工作目录不存在或不是有效目录。", "The working directory does not exist."),
+                    PluginText.text("工作目录无效", "Invalid working directory"));
+        }
+        return resolved == null && configured.isBlank() ? repositoryRoot : resolved;
+    }
+
+    private Path configuredCliWorkingDirectory(Path fallback) {
+        String configured = cliWorkingDirectory.getText().strip();
+        try {
+            if (!configured.isBlank()) {
+                Path candidate = Path.of(configured);
+                if (!candidate.isAbsolute() && fallback != null) candidate = fallback.resolve(candidate);
+                candidate = candidate.toAbsolutePath().normalize();
+                if (Files.isDirectory(candidate)) return candidate;
+            }
+        } catch (InvalidPathException ignored) {
+            // Historical reports remain readable even if a saved working directory is no longer available.
+        }
+        return fallback;
+    }
+
+    private void saveCliWorkingDirectory() {
+        cliWorkingDirectoryStore.save(cliWorkingDirectory.getText());
     }
 
     private void closeReportInAnotherLanguage(AnalysisRequest.OutputLanguage language) {
@@ -838,11 +965,11 @@ final class ArchitectureToolWindowPanel implements Disposable {
         outputLanguage.setSelectedIndex(selectedLanguage);
         selectedCommitList.getEmptyText().setText(PluginText.text("尚未选择提交", "No commits selected"));
         historyList.getEmptyText().setText(PluginText.text("当前项目还没有本地历史报告", "This project has no local reports yet"));
-        systemPrompt.getEmptyText().setText(PluginText.text("仅用于需要影响所有分析阶段的高级约束。",
-                "Use only for advanced constraints that must apply to every analysis stage."));
-        customPrompt.getEmptyText().setText(PluginText.text(
-                "例如：创作者数据由 OMS 导入；沿入口、数据来源、状态变化、落库和消费者展开。",
-                "For example: creator data is imported from OMS; follow its entry, origin, state changes, persistence, and consumers."));
+        historySearch.getTextEditor().getEmptyText().setText(PluginText.text(
+                "搜索函数名、文件路径或报告标题", "Search function, file, or report title"));
+        systemPrompt.getEmptyText().setText(PluginText.text(
+                "项目级系统指令。每个模型阶段都会严格遵守。",
+                "Project-level system instructions followed by every model stage."));
         PluginText.refresh(root);
         renderSelection();
         historyList.repaint();
@@ -856,9 +983,9 @@ final class ArchitectureToolWindowPanel implements Disposable {
     }
 
     private static String modeName(AnalysisRequest.Mode mode) {
-        return mode == AnalysisRequest.Mode.SELECTED_CHANGES
-                ? PluginText.text("提交改动", "Commit changes")
-                : PluginText.text("业务理解", "Business logic");
+        if (mode == AnalysisRequest.Mode.SELECTED_CHANGES) return PluginText.text("提交改动", "Commit changes");
+        if (mode == AnalysisRequest.Mode.FUNCTION_FLOW) return PluginText.text("函数流程", "Function flow");
+        return PluginText.text("业务理解", "Business logic");
     }
 
     private static String formatElapsed(long elapsedMs) {
@@ -900,7 +1027,9 @@ final class ArchitectureToolWindowPanel implements Disposable {
     }
 
     private void setBusy(boolean value, String message) {
-        busy = value;
+        if (value) activeOperations++;
+        else activeOperations = Math.max(0, activeOperations - 1);
+        busy = activeOperations > 0;
         updateActions();
         updateHistoryActions();
         progress.setVisible(busy);
@@ -909,7 +1038,6 @@ final class ArchitectureToolWindowPanel implements Disposable {
     }
 
     private void switchMode(AnalysisRequest.Mode nextMode) {
-        if (busy) return;
         if (nextMode == AnalysisRequest.Mode.SELECTED_CHANGES && selectedCommits.isEmpty()) {
             businessMode.setSelected(true);
             Messages.showInfoMessage(project,
@@ -934,17 +1062,44 @@ final class ArchitectureToolWindowPanel implements Disposable {
         analyze.setText(analysisMode == AnalysisRequest.Mode.BUSINESS_DOMAIN
                 ? PluginText.text("分析当前项目", "Analyze current project")
                 : PluginText.text("分析所选提交", "Analyze selected commits"));
-        analyze.setEnabled(!busy && hasScope && !focus.getText().trim().isEmpty());
-        businessMode.setEnabled(!busy);
-        changeMode.setEnabled(!busy && !selectedCommits.isEmpty());
+        analyze.setEnabled(hasScope && !focus.getText().trim().isEmpty());
+        businessMode.setEnabled(true);
+        changeMode.setEnabled(!selectedCommits.isEmpty());
     }
 
     private void updateHistoryActions() {
         boolean available = !busy && !historyLoading;
-        boolean selected = historyList.getSelectedValue() != null;
-        openHistory.setEnabled(available && selected);
-        deleteHistory.setEnabled(available && selected);
+        int selected = historyList.getSelectedIndices().length;
+        openHistory.setEnabled(available && selected == 1);
+        deleteHistory.setEnabled(available && selected > 0);
+        deleteHistory.setText(selected > 1
+                ? PluginText.text("删除所选 (" + selected + ")", "Delete selected (" + selected + ")")
+                : PluginText.text("删除所选", "Delete selected"));
+        boolean allSelected = historyModel.size() > 0 && selected == historyModel.size();
+        selectAllHistory.setText(allSelected
+                ? PluginText.text("取消全选", "Clear selection")
+                : PluginText.text("全选", "Select all"));
+        selectAllHistory.setEnabled(available && historyModel.size() > 0);
         refreshHistory.setEnabled(available && repositoryRoot != null);
+    }
+
+    private void updateLiveAnalysisAction() {
+        int count = FunctionAnalysisRunRegistry.activeCount(project);
+        boolean active = count > 0;
+        liveAnalysisLabel.setText(PluginText.text(
+                count + " 个分析任务正在运行", count + " analysis task(s) are running"));
+        showLiveAnalysis.setText(PluginText.text(
+                "查看任务 (" + count + ")", "Show tasks (" + count + ")"));
+        showLiveAnalysis.setEnabled(active);
+        liveAnalysisBar.setVisible(active);
+        liveAnalysisBar.revalidate();
+        liveAnalysisBar.repaint();
+    }
+
+    private static Throwable rootCause(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null && cause.getCause() != cause) cause = cause.getCause();
+        return cause;
     }
 
     private void showError(Throwable error) {
@@ -977,6 +1132,5 @@ final class ArchitectureToolWindowPanel implements Disposable {
 
     @Override
     public void dispose() {
-        if (project.getUserData(PANEL_KEY) == this) project.putUserData(PANEL_KEY, null);
     }
 }

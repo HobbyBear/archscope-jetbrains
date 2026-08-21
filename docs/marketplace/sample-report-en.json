@@ -1,0 +1,44 @@
+{
+  "title": "Chat Request Main Flow",
+  "summary": "A user question is validated, processed by the model, and returned to the client.",
+  "output_language": "en",
+  "comparison": { "mode": "current_snapshot", "target_commit": "0123456789abcdef" },
+  "business_overview": { "purpose": "Explain how a chat request gets answered end to end." },
+  "business_domains": [],
+  "nodes": [],
+  "unknowns": [],
+  "flow_map": {
+    "id": "root",
+    "execution": "independent",
+    "children": [{
+      "id": "chat-flow",
+      "title": "Send Chat Message",
+      "summary": "From client question submission to receiving the answer.",
+      "actor": "End User",
+      "trigger": "Client submits a chat question",
+      "outcome": "Client receives the complete answer",
+      "data_subject": "Chat Request",
+      "entry_source": { "entry_kind": "route" },
+      "data_flow": [
+        { "step_id": "validate", "phase": "validate", "data": "User question", "via": "call", "order": 1 },
+        { "step_id": "model", "phase": "transform", "data": "Model answer", "via": "http", "order": 2 },
+        { "step_id": "deliver", "phase": "deliver", "data": "Complete answer", "via": "websocket", "order": 3 }
+      ],
+      "children": [
+        {
+          "id": "validate",
+          "title": "Validate Chat Request",
+          "summary": "Check the question content and user context.",
+          "kind": "decision",
+          "main_path_label": "Validation passed",
+          "branches": [
+            { "label": "Invalid content", "meaning": "Reject the request and return an error", "outcome": "failure" },
+            { "label": "Needs more context", "meaning": "Enrich context, then continue", "outcome": "continue", "target_step_id": "model" }
+          ]
+        },
+        { "id": "model", "title": "Call Model to Generate Answer", "summary": "Send the context and consume the model result.", "relation_kind": "http", "main_path_label": "Generation done", "branches": [] },
+        { "id": "deliver", "title": "Deliver Answer to Client", "summary": "Return the final content over WebSocket.", "relation_kind": "websocket", "branches": [] }
+      ]
+    }]
+  }
+}

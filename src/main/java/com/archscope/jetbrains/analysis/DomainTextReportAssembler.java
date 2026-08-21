@@ -53,6 +53,8 @@ final class DomainTextReportAssembler {
         List<Anchor> anchors = anchors(sourceEvidence, fallbackPaths, manifest);
         List<String> result = new ArrayList<>(List.of(
                 "REPORT_TITLE", "REPORT_SUMMARY", "OVERVIEW_PURPOSE", "PRIMARY_ACTOR",
+                "PRIMARY_FLOW_KEY", "PRIMARY_FLOW_TITLE", "PRIMARY_FLOW_SUMMARY",
+                "PRIMARY_FLOW_TRIGGER", "PRIMARY_FLOW_OUTCOME", "PRIMARY_DATA_SUBJECT",
                 "DOMAIN_NAME", "DOMAIN_PURPOSE"
         ));
         JsonArray bindings = new JsonArray();
@@ -64,12 +66,9 @@ final class DomainTextReportAssembler {
             JsonObject flowBinding = new JsonObject();
             flowBinding.addProperty("binding_kind", "complete_flow");
             JsonArray sources = new JsonArray();
-            Anchor first = anchors.get(0);
             for (int index = 0; index < anchors.size(); index++) {
                 Anchor anchor = anchors.get(index);
-                if (first.path().equals(anchor.path()) && first.symbol().equals(anchor.symbol())) {
-                    sources.add(sourceBinding(anchor, index + 1));
-                }
+                sources.add(sourceBinding(anchor, index + 1));
             }
             flowBinding.add("sources", sources);
             JsonArray boundSlots = new JsonArray();
@@ -81,7 +80,18 @@ final class DomainTextReportAssembler {
             int number = index + 1;
             List<String> anchorSlots = List.of(
                     "STEP_" + number + "_TITLE", "STEP_" + number + "_SUMMARY",
-                    "STEP_" + number + "_DOMAIN_ID", "STEP_" + number + "_FLOW_KEY"
+                    "STEP_" + number + "_DOMAIN_ID", "STEP_" + number + "_FLOW_KEY",
+                    "STEP_" + number + "_RELEVANCE", "STEP_" + number + "_FLOW_ROLE",
+                    "STEP_" + number + "_FAILURE",
+                    "STEP_" + number + "_FLOW_TITLE", "STEP_" + number + "_FLOW_ACTOR",
+                    "STEP_" + number + "_FLOW_TRIGGER", "STEP_" + number + "_FLOW_OUTCOME",
+                    "STEP_" + number + "_FLOW_TYPE", "STEP_" + number + "_ENTRY_KIND",
+                    "STEP_" + number + "_DATA_SUBJECT", "STEP_" + number + "_PHASE",
+                    "STEP_" + number + "_KIND", "STEP_" + number + "_EXECUTION",
+                    "STEP_" + number + "_DATA_INPUT", "STEP_" + number + "_DATA_OUTPUT",
+                    "STEP_" + number + "_DATA_FROM", "STEP_" + number + "_DATA_TO",
+                    "STEP_" + number + "_DATA_TRANSFORMATION", "STEP_" + number + "_DATA_STORAGE",
+                    "STEP_" + number + "_VIA"
             );
             result.addAll(anchorSlots);
             Anchor anchor = anchors.get(index);
@@ -138,12 +148,18 @@ final class DomainTextReportAssembler {
         String summary = prose(text, "REPORT_SUMMARY",
                 english ? "A source-backed walkthrough of the requested business behavior."
                         : "基于源码证据说明所请求的业务行为。", english);
+        List<Integer> primaryIndexes = primaryIndexes(text, anchors);
+        Anchor primaryEntry = anchors.get(primaryIndexes.get(0));
         String actor = prose(text, "PRIMARY_ACTOR", english ? "Business caller" : "业务调用方", english);
-        String firstSourceLabel = narrativeSymbol(anchors.get(0), 0, english);
+        String firstSourceLabel = narrativeSymbol(primaryEntry, primaryIndexes.get(0), english);
         String genericTrigger = english ? "The business caller invokes this source-backed entry."
                 : "业务调用方触发这个有源码依据的入口。";
         String genericOutcome = english ? "The observed source responsibility completes."
                 : "已观察到的源码职责执行完成。";
+        String primaryTrigger = prose(text, "PRIMARY_FLOW_TRIGGER",
+                prose(text, "FLOW_1_TRIGGER", genericTrigger, english), english);
+        String primaryOutcome = prose(text, "PRIMARY_FLOW_OUTCOME",
+                prose(text, "FLOW_1_OUTCOME", genericOutcome, english), english);
 
         JsonObject analysis = new JsonObject();
         analysis.addProperty("schema", "closed-business-domain-analysis/v1");
@@ -154,18 +170,23 @@ final class DomainTextReportAssembler {
         overview.addProperty("purpose", prose(text, "OVERVIEW_PURPOSE", summary, english));
         overview.addProperty("primary_actor", actor);
         JsonArray story = new JsonArray();
-        story.add(genericTrigger);
-        story.add(summary);
-        story.add(genericOutcome);
+        addDistinct(story, primaryTrigger);
+        for (int index : primaryIndexes) {
+            int number = index + 1;
+            addDistinct(story, prose(text, "STEP_" + number + "_SUMMARY",
+                    english ? "Execute " + narrativeSymbol(anchors.get(index), index, true) + "."
+                            : "执行 " + narrativeSymbol(anchors.get(index), index, false) + " 对应的业务处理。", english));
+        }
+        addDistinct(story, primaryOutcome);
         overview.add("plain_story", story);
         JsonObject actorItem = new JsonObject();
         actorItem.addProperty("name", actor);
-        actorItem.addProperty("goal", genericOutcome);
+        actorItem.addProperty("goal", primaryOutcome);
         actorItem.addProperty("enters_via", firstSourceLabel);
         overview.add("actors", array(actorItem));
         overview.add("domain_relationships", new JsonArray());
         overview.add("terms", new JsonArray());
-        overview.add("business_objects", array(businessObject(anchors.get(0), summary, english)));
+        overview.add("business_objects", array(businessObject(primaryEntry, summary, english)));
         List<PlannedDomain> plannedDomains = plannedDomains(plan, text, english);
         overview.add("reading_order", new JsonArray());
         analysis.add("business_overview", overview);
@@ -178,7 +199,8 @@ final class DomainTextReportAssembler {
             String requested = text.getOrDefault("STEP_" + (index + 1) + "_DOMAIN_ID", "").strip();
             stepDomainIds.add(allowedDomainIds.contains(requested) ? requested : fallbackDomainId);
         }
-        Set<String> usedDomainIds = new LinkedHashSet<>(stepDomainIds);
+        Set<String> usedDomainIds = primaryIndexes.stream().map(stepDomainIds::get)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
         JsonArray readingOrder = new JsonArray();
         plannedDomains.stream().map(PlannedDomain::id).filter(usedDomainIds::contains).forEach(readingOrder::add);
         overview.add("reading_order", readingOrder);
@@ -200,7 +222,7 @@ final class DomainTextReportAssembler {
             domain.add("not_responsible", new JsonArray());
             domain.add("depends_on", new JsonArray());
             JsonArray sourceStepIds = new JsonArray();
-            for (int index = 0; index < stepDomainIds.size(); index++) {
+            for (int index : primaryIndexes) {
                 if (planned.id().equals(stepDomainIds.get(index))) sourceStepIds.add("source-step-" + (index + 1));
             }
             domain.add("source_step_ids", sourceStepIds);
@@ -209,26 +231,25 @@ final class DomainTextReportAssembler {
         analysis.add("domains", domainItems);
 
         Map<String, List<Integer>> flowGroups = new LinkedHashMap<>();
-        for (int index = 0; index < anchors.size(); index++) {
-            Anchor anchor = anchors.get(index);
-            String modelFlowKey = normalizedFlowKey(text.get("STEP_" + (index + 1) + "_FLOW_KEY"));
-            String flowKey = modelFlowKey.isBlank() ? anchor.path() + '\u0000' + anchor.symbol() : modelFlowKey;
-            flowGroups.computeIfAbsent(flowKey, ignored -> new ArrayList<>()).add(index);
-        }
+        flowGroups.put("primary", primaryIndexes);
         JsonArray flows = new JsonArray();
         int flowNumber = 0;
         for (List<Integer> group : flowGroups.values()) {
             flowNumber++;
             Anchor firstAnchor = anchors.get(group.get(0));
             String groupLabel = narrativeSymbol(firstAnchor, group.get(0), english);
-            String flowTitle = flowNumber == 1
-                    ? prose(text, "FLOW_1_TITLE",
-                    english ? "Source-backed business flow" : "源码支撑的业务流程", english)
-                    : english ? groupLabel + " business flow" : groupLabel + " 业务流程";
-            String flowSummary = flowNumber == 1 ? prose(text, "FLOW_1_SUMMARY", summary, english)
-                    : english ? "An independently evidenced source execution." : "一个独立取证的源码执行。";
-            String trigger = flowNumber == 1 ? prose(text, "FLOW_1_TRIGGER", genericTrigger, english) : genericTrigger;
-            String outcome = flowNumber == 1 ? prose(text, "FLOW_1_OUTCOME", genericOutcome, english) : genericOutcome;
+            String flowTitle = prose(text, "PRIMARY_FLOW_TITLE", prose(text, "FLOW_1_TITLE",
+                    english ? "Source-backed business flow" : "源码支撑的业务流程", english), english);
+            String flowSummary = prose(text, "PRIMARY_FLOW_SUMMARY", prose(text, "FLOW_1_SUMMARY", summary, english), english);
+            int firstNumber = group.get(0) + 1;
+            flowTitle = prose(text, "STEP_" + firstNumber + "_FLOW_TITLE", flowTitle, english);
+            String flowActor = prose(text, "STEP_" + firstNumber + "_FLOW_ACTOR", actor, english);
+            String trigger = prose(text, "STEP_" + firstNumber + "_FLOW_TRIGGER",
+                    primaryTrigger, english);
+            String outcome = prose(text, "STEP_" + firstNumber + "_FLOW_OUTCOME",
+                    primaryOutcome, english);
+            String dataSubject = prose(text, "STEP_" + firstNumber + "_DATA_SUBJECT",
+                    prose(text, "PRIMARY_DATA_SUBJECT", english ? "Business request" : "业务请求", english), english);
             String originId = "origin-" + flowNumber;
             String firstStepId = "source-step-" + (group.get(0) + 1);
 
@@ -239,37 +260,40 @@ final class DomainTextReportAssembler {
             flow.add("domain_ids", flowDomainIds);
             flow.addProperty("title", flowTitle);
             flow.addProperty("summary", flowSummary);
-            flow.addProperty("flow_type", "request");
+            flow.addProperty("flow_type", enumSlot(text, "STEP_" + firstNumber + "_FLOW_TYPE", "request",
+                    Set.of("request", "job", "event", "command")));
             flow.addProperty("execution_scope", "single_trigger");
-            flow.addProperty("actor", actor);
+            flow.addProperty("actor", flowActor);
             flow.addProperty("trigger", trigger);
             flow.addProperty("routing_condition", trigger);
             flow.add("preconditions", new JsonArray());
             flow.addProperty("outcome", outcome);
             flow.addProperty("end_title", outcome);
-            flow.addProperty("data_subject", english ? "Business request" : "业务请求");
+            flow.addProperty("data_subject", dataSubject);
             flow.addProperty("primary_origin_id", originId);
-            flow.add("data_reads", new JsonArray());
-            flow.add("data_writes", new JsonArray());
-            flow.add("failure_paths", new JsonArray());
+            flow.add("data_reads", groupValues(text, group, "DATA_INPUT"));
+            flow.add("data_writes", groupValues(text, group, "DATA_OUTPUT"));
+            flow.add("failure_paths", groupValues(text, group, "FAILURE"));
             flow.add("business_rules", new JsonArray());
             flow.add("consumer_targets", new JsonArray());
 
             JsonObject entry = source(firstAnchor);
             entry.addProperty("step_id", firstStepId);
-            entry.addProperty("entry_kind", "public_caller");
+            entry.addProperty("entry_kind", enumSlot(text, "STEP_" + firstNumber + "_ENTRY_KIND", "public_caller",
+                    Set.of("route", "job_registration", "event_consumer", "public_caller", "command",
+                            "external_boundary")));
             entry.addProperty("meaning", trigger);
             flow.add("entry_source", entry);
 
             JsonObject origin = source(firstAnchor);
             origin.addProperty("id", originId);
             origin.addProperty("role", "primary");
-            origin.addProperty("data", english ? "Business request" : "业务请求");
+            origin.addProperty("data", prose(text, "STEP_" + firstNumber + "_DATA_INPUT", dataSubject, english));
             origin.addProperty("meaning", trigger);
             origin.addProperty("source_kind", "unknown");
-            origin.addProperty("source", actor);
+            origin.addProperty("source", prose(text, "STEP_" + firstNumber + "_DATA_FROM", flowActor, english));
             origin.addProperty("entry", groupLabel);
-            origin.addProperty("owner", actor);
+            origin.addProperty("owner", flowActor);
             origin.addProperty("joins_step_id", firstStepId);
             origin.addProperty("upstream_producer_status", "confirmed");
             flow.add("data_origins", array(origin));
@@ -280,47 +304,71 @@ final class DomainTextReportAssembler {
                 int index = group.get(groupIndex);
                 Anchor anchor = anchors.get(index);
                 int number = index + 1;
-            String sourceLabel = narrativeSymbol(anchor, index, english);
-            String stepId = "source-step-" + number;
-            String stepTitle = prose(text, "STEP_" + number + "_TITLE",
-                    english ? "Source step " + number : "源码步骤 " + number, english);
-            String stepSummary = prose(text, "STEP_" + number + "_SUMMARY",
-                    english ? "Execute the source-backed responsibility at " + sourceLabel + "."
-                            : "执行 " + sourceLabel + " 对应的源码职责。", english);
+                String sourceLabel = narrativeSymbol(anchor, index, english);
+                String stepId = "source-step-" + number;
+                String stepTitle = prose(text, "STEP_" + number + "_TITLE",
+                        english ? "Source step " + number : "源码步骤 " + number, english);
+                String stepSummary = prose(text, "STEP_" + number + "_SUMMARY",
+                        english ? "Execute the source-backed responsibility at " + sourceLabel + "."
+                                : "执行 " + sourceLabel + " 对应的源码职责。", english);
 
-            JsonObject step = source(anchor);
-            step.addProperty("id", stepId);
-            step.addProperty("title", stepTitle);
-            step.addProperty("summary", stepSummary);
-            step.addProperty("kind", "success");
-            step.addProperty("execution", "same_execution");
-            step.addProperty("domain_id", stepDomainIds.get(index));
-            step.addProperty("node_kind", "method");
-            step.add("inputs", new JsonArray());
-            step.add("outputs", new JsonArray());
-            step.addProperty("relation_kind", "call");
-            step.addProperty("relation_label", stepTitle);
-            step.add("business_rules", new JsonArray());
-            step.add("branches", new JsonArray());
-            steps.add(step);
+                JsonObject step = source(anchor);
+                step.addProperty("id", stepId);
+                step.addProperty("title", stepTitle);
+                step.addProperty("summary", stepSummary);
+                step.addProperty("kind", enumSlot(text, "STEP_" + number + "_KIND", "stage",
+                        Set.of("stage", "decision", "success", "failure")));
+                step.addProperty("execution", enumSlot(text, "STEP_" + number + "_EXECUTION", "same_execution",
+                        Set.of("same_execution", "async_continuation")));
+                step.addProperty("domain_id", stepDomainIds.get(index));
+                step.addProperty("node_kind", "method");
+                step.add("inputs", new JsonArray());
+                step.add("outputs", new JsonArray());
+                String via = enumSlot(text, "STEP_" + number + "_VIA", "call",
+                        Set.of("http", "call", "event", "sql", "file", "memory", "websocket", "job"));
+                step.addProperty("relation_kind", via);
+                step.addProperty("relation_label", stepTitle);
+                step.add("business_rules", new JsonArray());
+                JsonArray branches = new JsonArray();
+                String failure = text.getOrDefault("STEP_" + number + "_FAILURE", "").strip();
+                if (!failure.isBlank()) {
+                    JsonObject branch = source(anchor);
+                    branch.addProperty("label", english ? "Failure" : "失败");
+                    branch.addProperty("outcome", "failure");
+                    branch.addProperty("meaning", failure);
+                    branch.addProperty("evidence", "source_backed_walkthrough");
+                    branches.add(branch);
+                }
+                step.add("branches", branches);
+                steps.add(step);
 
-            JsonObject hop = source(anchor);
-            hop.addProperty("id", "data-hop-" + number);
-            hop.addProperty("lineage_id", originId);
-            hop.addProperty("order", groupIndex + 1);
-            hop.addProperty("step_id", stepId);
-            hop.addProperty("phase", "deliver");
-            hop.addProperty("timing", "same_execution");
-            hop.addProperty("plain_action", stepSummary);
-            hop.addProperty("data", english ? "Business request" : "业务请求");
-            hop.addProperty("from", groupIndex == 0 ? actor
-                    : narrativeSymbol(anchors.get(group.get(groupIndex - 1)), group.get(groupIndex - 1), english));
-            hop.addProperty("to", sourceLabel);
-            hop.addProperty("via", "call");
-            hop.addProperty("transformation", stepSummary);
-            hop.addProperty("storage", english ? "Transient execution state" : "执行过程中的临时状态");
-            hop.addProperty("consumer", actor);
-            dataFlow.add(hop);
+                JsonObject hop = source(anchor);
+                hop.addProperty("id", "data-hop-" + number);
+                hop.addProperty("lineage_id", originId);
+                hop.addProperty("order", groupIndex + 1);
+                hop.addProperty("step_id", stepId);
+                hop.addProperty("phase", enumSlot(text, "STEP_" + number + "_PHASE",
+                        groupIndex == 0 ? "ingest" : groupIndex == group.size() - 1 ? "deliver" : "transform",
+                        Set.of("ingest", "validate", "transform", "persist", "deliver")));
+                hop.addProperty("timing", enumSlot(text, "STEP_" + number + "_EXECUTION", "same_execution",
+                        Set.of("same_execution", "async_continuation")));
+                hop.addProperty("plain_action", stepSummary);
+                String input = prose(text, "STEP_" + number + "_DATA_INPUT", dataSubject, english);
+                String output = prose(text, "STEP_" + number + "_DATA_OUTPUT", input, english);
+                hop.addProperty("data", output);
+                hop.addProperty("from", prose(text, "STEP_" + number + "_DATA_FROM",
+                        groupIndex == 0 ? flowActor
+                                : narrativeSymbol(anchors.get(group.get(groupIndex - 1)),
+                                group.get(groupIndex - 1), english), english));
+                hop.addProperty("to", prose(text, "STEP_" + number + "_DATA_TO", sourceLabel, english));
+                hop.addProperty("via", via);
+                hop.addProperty("transformation", prose(text, "STEP_" + number + "_DATA_TRANSFORMATION",
+                        input.equals(output) ? (english ? "No observed transformation" : "保持原样")
+                                : stepSummary, english));
+                hop.addProperty("storage", prose(text, "STEP_" + number + "_DATA_STORAGE",
+                        english ? "Transient execution state" : "执行过程中的临时状态", english));
+                hop.addProperty("consumer", prose(text, "STEP_" + number + "_DATA_TO", sourceLabel, english));
+                dataFlow.add(hop);
             }
             flow.add("steps", steps);
             flow.add("data_flow", dataFlow);
@@ -330,6 +378,58 @@ final class DomainTextReportAssembler {
         analysis.add("unknowns", new JsonArray());
         analysis.add("revision_history", new JsonArray());
         return analysis;
+    }
+
+    private JsonArray groupValues(Map<String, String> text, List<Integer> group, String suffix) {
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        for (int index : group) {
+            String value = text.getOrDefault("STEP_" + (index + 1) + "_" + suffix, "").strip();
+            if (!value.isBlank()) values.add(value);
+        }
+        JsonArray result = new JsonArray();
+        values.forEach(result::add);
+        return result;
+    }
+
+    private List<Integer> primaryIndexes(Map<String, String> text, List<Anchor> anchors) {
+        String requestedKey = normalizedFlowKey(text.get("PRIMARY_FLOW_KEY"));
+        boolean hasClassification = !requestedKey.isBlank();
+        Map<String, List<Integer>> groups = new LinkedHashMap<>();
+        List<Integer> explicitlyPrimary = new ArrayList<>();
+        for (int index = 0; index < anchors.size(); index++) {
+            int number = index + 1;
+            String relevance = text.getOrDefault("STEP_" + number + "_RELEVANCE", "").strip().toLowerCase(Locale.ROOT);
+            String declaredKey = normalizedFlowKey(text.get("STEP_" + number + "_FLOW_KEY"));
+            hasClassification |= !relevance.isBlank() || !declaredKey.isBlank();
+            if ("exclude".equals(relevance) || "supporting".equals(relevance)) continue;
+            String key = declaredKey;
+            if (key.isBlank()) key = "ungrouped-" + number;
+            groups.computeIfAbsent(key, ignored -> new ArrayList<>()).add(index);
+            if ("primary".equals(relevance)) explicitlyPrimary.add(index);
+        }
+        if (!hasClassification) return java.util.stream.IntStream.range(0, anchors.size()).boxed().toList();
+        if (!requestedKey.isBlank() && groups.containsKey(requestedKey)) {
+            return List.copyOf(groups.get(requestedKey));
+        }
+        if (!explicitlyPrimary.isEmpty()) return List.copyOf(explicitlyPrimary);
+        if (!groups.isEmpty()) {
+            return groups.values().stream().max(java.util.Comparator.comparingInt(List::size))
+                    .map(List::copyOf).orElseThrow();
+        }
+        return List.of(0);
+    }
+
+    private void addDistinct(JsonArray target, String value) {
+        if (value == null || value.isBlank()) return;
+        for (JsonElement element : target) {
+            if (element.isJsonPrimitive() && value.equals(element.getAsString())) return;
+        }
+        target.add(value);
+    }
+
+    private String enumSlot(Map<String, String> text, String key, String fallback, Set<String> allowed) {
+        String value = text.getOrDefault(key, "").strip().toLowerCase(Locale.ROOT);
+        return allowed.contains(value) ? value : fallback;
     }
 
     private List<PlannedDomain> plannedDomains(

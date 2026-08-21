@@ -25,11 +25,11 @@ import java.util.Set;
 public final class DomainEvidenceExpansionService {
     private static final Gson GSON = new Gson();
     private static final int MAX_SNIPPETS = 20;
-    private static final int MAX_EVIDENCE_CHARS = 190_000;
-    private static final int MAX_CANDIDATE_CHARS = 24_000;
-    private static final int MAX_QUERY_CHARS = 12_000;
-    private static final int MAX_CONTROL_FLOW_CHARS = 160_000;
-    private static final int MAX_CONTROL_FLOW_EXCERPT_CHARS = 90_000;
+    private static final int MAX_EVIDENCE_CHARS = 72_000;
+    private static final int MAX_CANDIDATE_CHARS = 12_000;
+    private static final int MAX_QUERY_CHARS = 8_000;
+    private static final int MAX_CONTROL_FLOW_CHARS = 52_000;
+    private static final int MAX_CONTROL_FLOW_EXCERPT_CHARS = 28_000;
     private static final int CONTEXT_LINES = 16;
     private static final int PARTIAL_SCOPE_HEAD_LINES = 24;
     private static final int PARTIAL_SCOPE_TAIL_LINES = 48;

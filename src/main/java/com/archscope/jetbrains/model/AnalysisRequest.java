@@ -10,7 +10,8 @@ public record AnalysisRequest(
         String focus,
         Mode mode,
         AnalysisGuidance guidance,
-        OutputLanguage outputLanguage
+        OutputLanguage outputLanguage,
+        Path cliWorkingDirectory
 ) {
     public AnalysisRequest {
         guidance = guidance == null ? AnalysisGuidance.EMPTY : guidance;
@@ -19,7 +20,7 @@ public record AnalysisRequest(
 
     public AnalysisRequest(Path repositoryRoot, List<CommitInfo> selectedCommits, String targetCommit, String focus) {
         this(repositoryRoot, selectedCommits, targetCommit, focus, Mode.SELECTED_CHANGES,
-                AnalysisGuidance.EMPTY, OutputLanguage.CHINESE);
+                AnalysisGuidance.EMPTY, OutputLanguage.CHINESE, null);
     }
 
     public AnalysisRequest(
@@ -30,7 +31,7 @@ public record AnalysisRequest(
             Mode mode
     ) {
         this(repositoryRoot, selectedCommits, targetCommit, focus, mode,
-                AnalysisGuidance.EMPTY, OutputLanguage.CHINESE);
+                AnalysisGuidance.EMPTY, OutputLanguage.CHINESE, null);
     }
 
     public AnalysisRequest(
@@ -41,7 +42,19 @@ public record AnalysisRequest(
             Mode mode,
             AnalysisGuidance guidance
     ) {
-        this(repositoryRoot, selectedCommits, targetCommit, focus, mode, guidance, OutputLanguage.CHINESE);
+        this(repositoryRoot, selectedCommits, targetCommit, focus, mode, guidance, OutputLanguage.CHINESE, null);
+    }
+
+    public AnalysisRequest(
+            Path repositoryRoot,
+            List<CommitInfo> selectedCommits,
+            String targetCommit,
+            String focus,
+            Mode mode,
+            AnalysisGuidance guidance,
+            OutputLanguage outputLanguage
+    ) {
+        this(repositoryRoot, selectedCommits, targetCommit, focus, mode, guidance, outputLanguage, null);
     }
 
     public static AnalysisRequest businessDomain(Path repositoryRoot, String focus) {
@@ -58,16 +71,45 @@ public record AnalysisRequest(
             AnalysisGuidance guidance,
             OutputLanguage outputLanguage
     ) {
-        return new AnalysisRequest(repositoryRoot, List.of(), "", focus, Mode.BUSINESS_DOMAIN, guidance, outputLanguage);
+        return new AnalysisRequest(repositoryRoot, List.of(), "", focus, Mode.BUSINESS_DOMAIN,
+                guidance, outputLanguage, null);
+    }
+
+    public static AnalysisRequest functionFlow(
+            Path repositoryRoot,
+            FunctionTarget target,
+            AnalysisGuidance guidance,
+            OutputLanguage outputLanguage
+    ) {
+        return new AnalysisRequest(
+                repositoryRoot,
+                List.of(),
+                "",
+                "函数级业务流程：" + target.displayName(),
+                Mode.FUNCTION_FLOW,
+                guidance,
+                outputLanguage,
+                null
+        );
+    }
+
+    public AnalysisRequest withCliWorkingDirectory(Path workingDirectory) {
+        return new AnalysisRequest(repositoryRoot, selectedCommits, targetCommit, focus, mode,
+                guidance, outputLanguage, workingDirectory);
     }
 
     public boolean isBusinessDomain() {
         return mode == Mode.BUSINESS_DOMAIN;
     }
 
+    public boolean isFunctionFlow() {
+        return mode == Mode.FUNCTION_FLOW;
+    }
+
     public enum Mode {
         SELECTED_CHANGES,
-        BUSINESS_DOMAIN
+        BUSINESS_DOMAIN,
+        FUNCTION_FLOW
     }
 
     public enum OutputLanguage {

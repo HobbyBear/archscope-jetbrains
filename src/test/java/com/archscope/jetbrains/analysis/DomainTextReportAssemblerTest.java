@@ -45,6 +45,17 @@ final class DomainTextReportAssemblerTest {
                 STEP_1_SUMMARY\t创建入口接收并处理创作者请求。
                 STEP_1_DOMAIN_ID\tcreator
                 STEP_1_FLOW_KEY\tcreator_request
+                STEP_1_FLOW_ACTOR\t运营人员
+                STEP_1_FLOW_TRIGGER\t提交创作者资料
+                STEP_1_FLOW_OUTCOME\t创作者记录已建立
+                STEP_1_DATA_SUBJECT\t创作者资料
+                STEP_1_PHASE\tpersist
+                STEP_1_DATA_INPUT\t待创建的创作者资料
+                STEP_1_DATA_OUTPUT\t已创建的创作者记录
+                STEP_1_DATA_FROM\t管理端请求
+                STEP_1_DATA_TO\t创作者存储
+                STEP_1_DATA_TRANSFORMATION\t补齐标识后保存
+                STEP_1_DATA_STORAGE\t创作者表
                 """;
 
         JsonObject report = new DomainTextReportAssembler().assemble(prose, request, evidence, plan, sourceEvidence);
@@ -57,6 +68,14 @@ final class DomainTextReportAssemblerTest {
         assertEquals(2, report.getAsJsonArray("nodes").get(0).getAsJsonObject().get("line").getAsInt());
         assertEquals("creator", report.getAsJsonArray("business_domains").get(0).getAsJsonObject()
                 .get("id").getAsString());
+        JsonObject flow = report.getAsJsonObject("flow_map").getAsJsonArray("children").get(0).getAsJsonObject();
+        assertEquals("创作者资料", flow.get("data_subject").getAsString());
+        assertEquals("运营人员", flow.get("actor").getAsString());
+        JsonObject hop = flow.getAsJsonArray("data_flow").get(0).getAsJsonObject();
+        assertEquals("persist", hop.get("phase").getAsString());
+        assertEquals("管理端请求", hop.get("from").getAsString());
+        assertEquals("创作者存储", hop.get("to").getAsString());
+        assertEquals("创作者表", hop.get("storage").getAsString());
     }
 
     @Test
@@ -198,8 +217,8 @@ final class DomainTextReportAssemblerTest {
 
         assertEquals("向支付渠道收取本次订单款项。", responsibilityByFile.get("src/PaymentService.java"));
         assertEquals("为本次订单预留可售库存。", responsibilityByFile.get("src/InventoryService.java"));
-        assertEquals(2, report.getAsJsonObject("flow_map").getAsJsonArray("children").size());
-        assertEquals(1, report.getAsJsonObject("flow_map").getAsJsonArray("children")
+        assertEquals(1, report.getAsJsonObject("flow_map").getAsJsonArray("children").size());
+        assertEquals(2, report.getAsJsonObject("flow_map").getAsJsonArray("children")
                 .get(0).getAsJsonObject().getAsJsonArray("children").size());
         assertEquals("root", report.getAsJsonObject("flow_map").get("id").getAsString());
     }
@@ -225,13 +244,66 @@ final class DomainTextReportAssemblerTest {
                 """;
         DomainTextReportAssembler assembler = new DomainTextReportAssembler();
 
-        assertEquals(18, assembler.textContract(sourceEvidence, plan, evidence).slots().size());
+        assertEquals(64, assembler.textContract(sourceEvidence, plan, evidence).slots().size());
         JsonObject report = assembler.assemble(
                 "STEP_1_SUMMARY\t结算时依次预留库存并收取款项。", request, evidence, plan, sourceEvidence
         );
         assertEquals(2, report.getAsJsonArray("nodes").size());
         assertEquals(3, report.getAsJsonArray("nodes").get(0).getAsJsonObject().get("line").getAsInt());
         assertEquals(4, report.getAsJsonArray("nodes").get(1).getAsJsonObject().get("line").getAsInt());
+    }
+
+    @Test
+    void keepsOnlyTheDeclaredPrimaryJourneyAndBuildsOverviewFromItsOrderedSteps() throws Exception {
+        Path entry = repository.resolve("src/ChatEntry.java");
+        Path model = repository.resolve("src/ChatModel.java");
+        Path history = repository.resolve("src/ChatHistory.java");
+        Files.createDirectories(entry.getParent());
+        Files.writeString(entry, "class ChatEntry { void send() {} }\n");
+        Files.writeString(model, "class ChatModel { void complete() {} }\n");
+        Files.writeString(history, "class ChatHistory { void list() {} }\n");
+        AnalysisRequest request = AnalysisRequest.businessDomain(repository, "分析聊天逻辑");
+        EvidencePack evidence = evidence(entry, model, history);
+        DomainEvidencePlan plan = DomainEvidencePlan.parse("""
+                {"schema":"business-domain-evidence-plan/v1",
+                 "candidate_paths":["src/ChatEntry.java","src/ChatModel.java","src/ChatHistory.java"],
+                 "queries":[]}
+                """, evidence);
+        String sourceEvidence = """
+                {"schema":"business-domain-source-evidence/v1","query_results":[],"control_flow_excerpts":[],
+                 "candidate_excerpts":[
+                   {"path":"src/ChatEntry.java","excerpt":"1: class ChatEntry { void send() {} }"},
+                   {"path":"src/ChatModel.java","excerpt":"1: class ChatModel { void complete() {} }"},
+                   {"path":"src/ChatHistory.java","excerpt":"1: class ChatHistory { void list() {} }"}]}
+                """;
+
+        JsonObject report = new DomainTextReportAssembler().assemble("""
+                PRIMARY_FLOW_KEY\tchat_send
+                PRIMARY_FLOW_TRIGGER\t客户端发送一条消息。
+                PRIMARY_FLOW_OUTCOME\t客户端收到模型回复。
+                STEP_1_FLOW_KEY\tchat_send
+                STEP_1_RELEVANCE\tprimary
+                STEP_1_SUMMARY\t服务端接收客户端消息。
+                STEP_1_FAILURE\t消息格式错误时直接向客户端返回参数错误。
+                STEP_2_FLOW_KEY\tchat_send
+                STEP_2_RELEVANCE\tprimary
+                STEP_2_SUMMARY\t模型根据消息生成回复。
+                STEP_3_FLOW_KEY\thistory_list
+                STEP_3_RELEVANCE\texclude
+                STEP_3_SUMMARY\t历史页面查询旧消息。
+                """, request, evidence, plan, sourceEvidence);
+
+        JsonObject flow = report.getAsJsonObject("flow_map").getAsJsonArray("children").get(0).getAsJsonObject();
+        assertEquals(1, report.getAsJsonObject("flow_map").getAsJsonArray("children").size());
+        assertEquals(2, flow.getAsJsonArray("children").size());
+        assertEquals(1, flow.getAsJsonArray("children").get(0).getAsJsonObject()
+                .getAsJsonArray("branches").size());
+        assertEquals(2, report.getAsJsonArray("nodes").size());
+        assertEquals(4, report.getAsJsonObject("business_overview").getAsJsonArray("plain_story").size());
+        assertTrue(report.getAsJsonObject("business_overview").getAsJsonArray("plain_story").toString()
+                .contains("客户端收到模型回复"));
+        assertTrue(report.getAsJsonArray("nodes").asList().stream()
+                .noneMatch(node -> node.getAsJsonObject().get("file").getAsString().contains("History")));
     }
 
     private EvidencePack evidence(Path source) {

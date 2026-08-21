@@ -1,0 +1,37 @@
+{
+  "schema": "codebecause-function-flow/v1",
+  "report_type": "function_flow",
+  "title": "CharacterService.CalculatePriorScore 函数业务流程",
+  "summary": "校验人设输入，组合规则评分并记录结果",
+  "target_commit": "9da09f06ef725c7b9715e6a0226b59581be2ddf1",
+  "function_target": {
+    "stable_id": "0123456789abcdef0123456789abcdef",
+    "file": "apps/chat/service/character_prior_score.go",
+    "symbol": "CharacterService.CalculatePriorScore",
+    "signature": "func (s *CharacterService) CalculatePriorScore(ctx context.Context, character *Character) (*Score, error)",
+    "line": 42,
+    "end_line": 168,
+    "expansion_policy": "novice_complete"
+  },
+  "nodes": [
+    {"id":"root","symbol":"CharacterService.CalculatePriorScore","label":"计算人设先验评分","kind":"entry","depth":0,"file":"apps/chat/service/character_prior_score.go","line":42,"end_line":168,"business_role":"接收人设草稿并编排评分流程","logic":"校验输入后组合规则得分","inputs":["人设草稿","操作者"],"outputs":["先验评分"],"conditions":[],"side_effects":[]},
+    {"id":"validate","symbol":"validateCharacterDraft","label":"校验人设草稿","kind":"decision","depth":1,"file":"apps/chat/service/character_prior_score.go","line":55,"end_line":72,"business_role":"拒绝不完整人设进入评分","logic":"名称、描述或图片缺失时提前返回","inputs":["人设草稿"],"outputs":["有效草稿"],"conditions":["名称非空","描述达到最小长度"],"side_effects":[]},
+    {"id":"rules","symbol":"calculateRuleScores","label":"逐项执行评分规则","kind":"function","depth":1,"file":"apps/chat/service/character_creation_score_rules.go","line":20,"end_line":146,"business_role":"把人设质量转换为分项得分","logic":"按字段与内容质量累计得分","inputs":["有效草稿"],"outputs":["分项得分"],"conditions":["规则启用"],"side_effects":[],"expandable":true,"expansion_reason":"评分规则内部仍有可按需检查的业务分支"},
+    {"id":"bonus","symbol":"priorGradeBonus","label":"叠加等级奖励","kind":"function","depth":2,"file":"apps/chat/service/character_creation_score_rules.go","line":151,"end_line":180,"business_role":"根据创作者等级增加奖励分","logic":"读取等级并映射奖励","inputs":["创作者等级"],"outputs":["奖励分"],"conditions":[],"side_effects":[]},
+    {"id":"persist","symbol":"CharacterPriorScoreDal.Save","label":"保存评分明细","kind":"storage","depth":1,"file":"apps/chat/dal/character_prior_score.go","line":31,"end_line":70,"business_role":"保留评分结果供创建页展示和审计","logic":"写入总分与规则明细","inputs":["总分","分项得分"],"outputs":["评分记录"],"conditions":[],"side_effects":["写数据库"]},
+    {"id":"reject","symbol":"CalculatePriorScore","label":"返回输入错误","kind":"error","depth":1,"file":"apps/chat/service/character_prior_score.go","line":60,"end_line":64,"business_role":"终止无效评分请求","logic":"不写入评分记录","inputs":[],"outputs":["参数错误"],"conditions":["草稿无效"],"side_effects":[]},
+    {"id":"done","symbol":"CalculatePriorScore","label":"返回评分结果","kind":"return","depth":1,"file":"apps/chat/service/character_prior_score.go","line":161,"end_line":166,"business_role":"向调用方返回可展示评分","logic":"组装总分与明细","inputs":["评分记录"],"outputs":["评分响应"],"conditions":[],"side_effects":[]}
+  ],
+  "edges": [
+    {"id":"e1","from":"root","to":"validate","kind":"call","label":"先校验"},
+    {"id":"e2","from":"validate","to":"reject","kind":"error","label":"校验失败"},
+    {"id":"e3","from":"validate","to":"rules","kind":"branch","label":"校验通过"},
+    {"id":"e4","from":"rules","to":"bonus","kind":"call","label":"追加奖励"},
+    {"id":"e5","from":"rules","to":"persist","kind":"data","label":"汇总得分"},
+    {"id":"e6","from":"persist","to":"done","kind":"return","label":"保存成功"}
+  ],
+  "coverage": {"novice_complete":false,"stopping_reason":"评分规则可按需继续展开","expandable_node_ids":["rules"]},
+  "unknowns": [],
+  "revision_history": [],
+  "analysis_diagnostics": {"elapsed_ms": 128000}
+}

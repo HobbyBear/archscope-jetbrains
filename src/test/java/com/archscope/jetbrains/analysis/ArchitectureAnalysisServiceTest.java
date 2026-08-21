@@ -14,6 +14,7 @@ import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.Set;
@@ -29,32 +30,17 @@ final class ArchitectureAnalysisServiceTest {
     Path repository;
 
     @Test
-    void usesOneModelTurnOnlyForBoundedAggregateChanges() {
-        assertTrue(ArchitectureAnalysisService.shouldUseDirectAnalysis(30, 90_000));
-        assertFalse(ArchitectureAnalysisService.shouldUseDirectAnalysis(31, 20_000));
-        assertFalse(ArchitectureAnalysisService.shouldUseDirectAnalysis(3, 90_001));
-    }
+    void businessPromptDefinesOneCompleteSopTurn() {
+        EvidencePack evidence = new EvidencePack(
+                repository, "head", "head", "head", "tree", "fingerprint",
+                List.of(), "", List.of(), List.of("src/App.java")
+        );
+        String prompt = new PromptBuilder().businessDomainSopPrompt(
+                AnalysisRequest.businessDomain(repository, "分析业务流程"), evidence);
 
-    @Test
-    void usesIncrementalPatchOnlyForClosedNonStructuralRefinements() {
-        JsonObject closed = JsonParser.parseString("""
-                {"unknowns":[],"flow_map":{"id":"root","children":[{"id":"flow-1","children":[]}]}}
-                """).getAsJsonObject();
-        assertTrue(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
-                closed, intent(DomainEvidencePlan.Operation.UPDATE_EXPLANATION)
-        ));
-        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
-                closed, intent(DomainEvidencePlan.Operation.ADD_NODES)
-        ));
-        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
-                closed, intent(DomainEvidencePlan.Operation.ADD_NODES)
-        ));
-        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
-                closed, intent(DomainEvidencePlan.Operation.MERGE_FLOWS)
-        ));
-        closed.getAsJsonArray("unknowns").add("入口未知");
-        assertFalse(ArchitectureAnalysisService.shouldUseIncrementalDomainPatch(
-                closed, intent(DomainEvidencePlan.Operation.UPDATE_EXPLANATION)));
+        assertTrue(prompt.contains("single_session_sop"));
+        assertTrue(prompt.contains("only model turn"));
+        assertTrue(prompt.contains("acceptance_checklist"));
     }
 
     @Test
@@ -124,7 +110,21 @@ final class ArchitectureAnalysisServiceTest {
     }
 
     @Test
-    void automaticallyExpandsEvidenceUntilUnknownsAreConfirmed() throws Exception {
+    void usesCustomCliDirectoryAndSeparatesItsCache() {
+        AnalysisRequest automatic = AnalysisRequest.businessDomain(repository, "分析聊天逻辑");
+        AnalysisRequest custom = automatic.withCliWorkingDirectory(repository.resolve("apps/chat"));
+        EvidencePack evidence = new EvidencePack(
+                repository, "head", "head", "head", "tree", "fingerprint",
+                List.of(), "", List.of(), List.of());
+
+        assertEquals(repository, ArchitectureAnalysisService.cliWorkingDirectory(automatic, evidence));
+        assertEquals(repository.resolve("apps/chat"), ArchitectureAnalysisService.cliWorkingDirectory(custom, evidence));
+        assertFalse(ArchitectureAnalysisService.requestCacheProfile("queue", automatic, "v-test")
+                .equals(ArchitectureAnalysisService.requestCacheProfile("queue", custom, "v-test")));
+    }
+
+    @Test
+    void initialBusinessAnalysisUsesExactlyOneSopTurn() throws Exception {
         git("init");
         git("config", "user.email", "test@example.com");
         git("config", "user.name", "Test");
@@ -143,30 +143,30 @@ final class ArchitectureAnalysisServiceTest {
 
         AnalysisRequest request = AnalysisRequest.businessDomain(repository, "分析创作者从创建、审核到发布的完整流程");
         EvidencePack evidence = new GitEvidenceService().collectSnapshot(request, indicator());
-        QueueModelClient client = new QueueModelClient(List.of(
-                plan("createCreator"),
-                report("[{\"question\":\"publishCreator 的审核通过条件未知\",\"kind\":\"rule\",\"flow_id\":\"creator-flow\",\"symbols\":[\"publishCreator\"],\"why_material\":\"无法确认发布条件\"}]"),
-                resolution()
-        ));
+        QueueModelClient client = new QueueModelClient(List.of(report("[]")));
         System.setProperty("archscope.cacheDir", repository.resolve("cache").toString());
         AnalysisResult result;
+        List<ModelStreamEvent> streamEvents = new ArrayList<>();
         try {
-            result = new ArchitectureAnalysisService(client).analyze(request, evidence, indicator());
+            result = new ArchitectureAnalysisService(client).analyze(
+                    request, evidence, indicator(), ignored -> {}, streamEvents::add);
         } finally {
             System.clearProperty("archscope.cacheDir");
         }
 
         JsonObject json = JsonParser.parseString(result.reportJson()).getAsJsonObject();
-        assertEquals(3, client.calls);
+        assertEquals(1, client.calls);
+        assertEquals(List.of(ModelStreamEvent.Kind.REASONING), streamEvents.stream().map(ModelStreamEvent::kind).toList());
         assertEquals(0, json.getAsJsonArray("unknowns").size());
-        assertEquals(2, json.getAsJsonObject("analysis_diagnostics").get("evidence_rounds").getAsInt());
-        assertEquals("confirmed", json.getAsJsonObject("analysis_diagnostics").get("stop_reason").getAsString());
+        assertEquals(1, json.getAsJsonObject("analysis_diagnostics").get("model_calls").getAsInt());
+        assertEquals(1, json.getAsJsonObject("analysis_diagnostics").get("evidence_rounds").getAsInt());
+        assertEquals("single_sop_confirmed", json.getAsJsonObject("analysis_diagnostics").get("stop_reason").getAsString());
         assertEquals("queue-model", json.getAsJsonObject("analysis_diagnostics")
                 .get("model_provider_id").getAsString());
     }
 
     @Test
-    void fallsBackFromATruncatedInitialBusinessResponseWithoutARepairTurn() throws Exception {
+    void invalidBusinessResponseDoesNotTriggerASecondModelTurn() throws Exception {
         git("init");
         git("config", "user.email", "test@example.com");
         git("config", "user.name", "Test");
@@ -186,23 +186,19 @@ final class ArchitectureAnalysisServiceTest {
         AnalysisRequest request = AnalysisRequest.businessDomain(repository, "分析创作者流程");
         EvidencePack evidence = new GitEvidenceService().collectSnapshot(request, indicator());
         QueueModelClient client = new QueueModelClient(List.of(
-                plan("createCreator"),
-                "{\"schema\":\"closed-business-domain-analysis/v1\",\"flows\":["
-        ));
+                "{\"schema\":\"closed-business-domain-analysis/v1\",\"flows\":["));
         System.setProperty("archscope.cacheDir", repository.resolve("repair-cache").toString());
         try {
-            AnalysisResult result = new ArchitectureAnalysisService(client).analyze(request, evidence, indicator());
-
-            assertEquals(2, client.calls);
-            assertEquals("分析创作者流程", JsonParser.parseString(result.reportJson()).getAsJsonObject()
-                    .get("title").getAsString());
+            assertThrows(ModelClientException.class,
+                    () -> new ArchitectureAnalysisService(client).analyze(request, evidence, indicator()));
+            assertEquals(1, client.calls);
         } finally {
             System.clearProperty("archscope.cacheDir");
         }
     }
 
     @Test
-    void refinesAClosedBusinessReportWithTwoModelCallsAndAnIncrementalPatch() throws Exception {
+    void initialAndRefinementButtonsEachUseOneSopTurn() throws Exception {
         git("init");
         git("config", "user.email", "test@example.com");
         git("config", "user.name", "Test");
@@ -222,15 +218,9 @@ final class ArchitectureAnalysisServiceTest {
         AnalysisRequest request = AnalysisRequest.businessDomain(repository, "分析创作者流程");
         EvidencePack evidence = new GitEvidenceService().collectSnapshot(request, indicator());
         QueueModelClient client = new QueueModelClient(List.of(
-                plan("createCreator"),
                 report("[]"),
-                plan("publishCreator"),
-                """
-                {"schema":"business-domain-refinement-patch/v1","requires_structural_rebuild":false,
-                 "reason":"只修正已有流程摘要","flow_updates":[
-                   {"flow_id":"creator-flow","summary":"审核通过后发布并通知"}],
-                 "step_updates":[],"domain_updates":[],"revision_summary":"补充发布结果"}
-                """
+                report("[]").replace("\"summary\":\"完整流程\"",
+                        "\"summary\":\"审核通过后发布并通知\"")
         ));
         System.setProperty("archscope.cacheDir", repository.resolve("patch-cache").toString());
         try {
@@ -243,10 +233,11 @@ final class ArchitectureAnalysisServiceTest {
             JsonObject json = JsonParser.parseString(refined.reportJson()).getAsJsonObject();
             JsonObject flow = json.getAsJsonObject("flow_map").getAsJsonArray("children")
                     .get(0).getAsJsonObject();
-            assertEquals(4, client.calls);
+            assertEquals(2, client.calls);
             assertEquals("审核通过后发布并通知", flow.get("summary").getAsString());
             assertEquals(0, json.getAsJsonArray("unknowns").size());
-            assertEquals("incremental_patch",
+            assertEquals(1, json.getAsJsonObject("analysis_diagnostics").get("model_calls").getAsInt());
+            assertEquals("single_sop_confirmed",
                     json.getAsJsonObject("analysis_diagnostics").get("stop_reason").getAsString());
             assertEquals("refinement",
                     json.getAsJsonObject("analysis_diagnostics").get("operation").getAsString());
@@ -257,7 +248,7 @@ final class ArchitectureAnalysisServiceTest {
     }
 
     @Test
-    void stopsWhenAnUnknownHasNeitherAResolutionNorANewSourceFrontier() throws Exception {
+    void unknownsRemainHonestWithoutStartingAConvergenceTurn() throws Exception {
         git("init");
         git("config", "user.email", "test@example.com");
         git("config", "user.name", "Test");
@@ -277,10 +268,7 @@ final class ArchitectureAnalysisServiceTest {
         AnalysisRequest request = AnalysisRequest.businessDomain(repository, "分析创作者发布流程");
         EvidencePack evidence = new GitEvidenceService().collectSnapshot(request, indicator());
         QueueModelClient client = new QueueModelClient(List.of(
-                plan("createCreator"),
-                report("[{\"question\":\"publishCreator 的审核通过条件未知\",\"kind\":\"rule\",\"flow_id\":\"creator-flow\",\"symbols\":[\"publishCreator\"],\"why_material\":\"无法确认发布条件\"}]"),
-                unresolvedResolution()
-        ));
+                report("[{\"question\":\"publishCreator 的审核通过条件未知\",\"kind\":\"rule\",\"flow_id\":\"creator-flow\",\"symbols\":[\"publishCreator\"],\"why_material\":\"无法确认发布条件\"}]")));
         System.setProperty("archscope.cacheDir", repository.resolve("stable-cache").toString());
         AnalysisResult result;
         try {
@@ -290,46 +278,10 @@ final class ArchitectureAnalysisServiceTest {
         }
 
         JsonObject json = JsonParser.parseString(result.reportJson()).getAsJsonObject();
-        assertEquals(3, client.calls);
+        assertEquals(1, client.calls);
         assertEquals(1, json.getAsJsonArray("unknowns").size());
-        assertEquals("unknowns_stable",
+        assertEquals("single_sop_with_unknowns",
                 json.getAsJsonObject("analysis_diagnostics").get("stop_reason").getAsString());
-    }
-
-    @Test
-    void evidenceIdentityIgnoresPlannerWordingButTracksDifferentSourceMatches() {
-        String first = """
-                {"candidate_excerpts":[],"query_results":[{"literal":"a","reason":"one","matches":[
-                  {"path":"src/a.go","matched_line":3,"snippet":"3: first"}]}]}
-                """;
-        String sameEvidence = """
-                {"candidate_excerpts":[],"query_results":[{"literal":"renamed","reason":"two","matches":[
-                  {"path":"src/a.go","matched_line":3,"snippet":"3: first"}]}]}
-                """;
-        String newEvidence = """
-                {"candidate_excerpts":[],"query_results":[{"literal":"b","matches":[
-                  {"path":"src/a.go","matched_line":9,"snippet":"9: second"}]}]}
-                """;
-
-        assertEquals(
-                ArchitectureAnalysisService.sourceEvidenceIdentity(first),
-                ArchitectureAnalysisService.sourceEvidenceIdentity(sameEvidence)
-        );
-        assertFalse(ArchitectureAnalysisService.sourceEvidenceIdentity(first)
-                .equals(ArchitectureAnalysisService.sourceEvidenceIdentity(newEvidence)));
-
-        String firstControlScope = """
-                {"query_results":[{"literal":"first","matches":[{"path":"src/a.go","matched_line":3,"snippet":"first"}]}],
-                 "control_flow_excerpts":[{"path":"src/a.go","matched_lines":[3],"excerpt":"complete_function_scope:1-9\\n1:func A()"}]}
-                """;
-        String renamedControlScope = """
-                {"query_results":[{"literal":"renamed","matches":[{"path":"src/a.go","matched_line":8,"snippet":"other hit"}]}],
-                 "control_flow_excerpts":[{"path":"src/a.go","matched_lines":[8],"excerpt":"complete_function_scope:1-9\\n1:func A()"}]}
-                """;
-        assertEquals(
-                ArchitectureAnalysisService.sourceEvidenceIdentity(firstControlScope),
-                ArchitectureAnalysisService.sourceEvidenceIdentity(renamedControlScope)
-        );
     }
 
     @Test
@@ -348,15 +300,6 @@ final class ArchitectureAnalysisServiceTest {
                 java.util.Set.of("src/controller.go", "src/service.go", "src/store.go"),
                 ArchitectureAnalysisService.reportSourcePaths(report, evidence)
         );
-    }
-
-    private String plan(String literal) {
-        return """
-                {"schema":"business-domain-evidence-plan/v1","topic":"creator",
-                 "likely_domains":[{"id":"creator","name":"创作者","purpose":"管理创作者生命周期"}],
-                 "candidate_paths":["src/CreatorFlow.java"],
-                 "queries":[{"literal":"%s","role":"state","reason":"定位流程状态"}]}
-                """.formatted(literal);
     }
 
     private static DomainEvidencePlan.EditIntent intent(DomainEvidencePlan.Operation operation) {
@@ -395,25 +338,6 @@ final class ArchitectureAnalysisServiceTest {
                      {"id":"s4","title":"通知","summary":"通知结果","kind":"success","execution":"same_execution","domain_id":"creator","file":"src/CreatorFlow.java","line":5,"symbol":"notifyCreator","node_kind":"method","inputs":[],"outputs":[],"relation_kind":"call","relation_label":"通知","evidence":"direct_source","confidence":"high","business_rules":[],"branches":[]}]}],
                  "unknowns":%s,"revision_history":[]}
                 """.formatted(unknowns);
-    }
-
-    private String resolution() {
-        return """
-                {"schema":"business-domain-evidence-resolution/v1","report_summary":"创建、审核、发布均已由源码确认",
-                 "resolutions":[{"question":"publishCreator 的审核通过条件未知","status":"confirmed",
-                   "conclusion":"审核通过后调用发布方法","file":"src/CreatorFlow.java","line":4,
-                   "symbol":"publishCreator","evidence":"direct_source","confidence":"high","flow_id":"creator-flow"}],
-                 "new_unknowns":[],"flow_updates":[{"flow_id":"creator-flow","summary":"审核通过后发布"}]}
-                """;
-    }
-
-    private String unresolvedResolution() {
-        return """
-                {"schema":"business-domain-evidence-resolution/v1","resolutions":[
-                  {"question":"publishCreator 的审核通过条件未知","status":"unresolved","conclusion":"当前批次不能确认",
-                   "file":"","line":1,"symbol":"","evidence":"inferred","confidence":"low","flow_id":"creator-flow"}],
-                 "new_unknowns":[],"next_frontier_queries":[],"flow_updates":[],"step_updates":[]}
-                """;
     }
 
     private String git(String... arguments) throws Exception {
@@ -469,6 +393,21 @@ final class ArchitectureAnalysisServiceTest {
             String response = responses.poll();
             if (response == null) throw new ModelClientException("Unexpected model call " + calls);
             return response;
+        }
+
+        @Override
+        public String complete(
+                String systemPrompt,
+                String userPrompt,
+                Path workingDirectory,
+                ProgressIndicator indicator,
+                String stage,
+                Consumer<String> statusListener,
+                WorkspaceAccess workspaceAccess,
+                Consumer<ModelStreamEvent> streamListener
+        ) throws ModelClientException {
+            streamListener.accept(ModelStreamEvent.reasoning("visible business reasoning"));
+            return complete(systemPrompt, userPrompt, workingDirectory, indicator, stage, statusListener, workspaceAccess);
         }
     }
 }

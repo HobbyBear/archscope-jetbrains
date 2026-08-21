@@ -32,15 +32,19 @@ final class DomainAnalysisBenchmarkTest {
             String reading = System.getProperty("archscope.domainCodeReadingPrompt", "").strip();
             customPrompt = context.isBlank() ? reading : reading.isBlank() ? context : context + "\n\n" + reading;
         }
-        AnalysisGuidance guidance = new AnalysisGuidance(
-                customPrompt,
-                System.getProperty("archscope.domainSystemPrompt", "")
-        );
+        String explicitSystemPrompt = System.getProperty("archscope.domainSystemPrompt", "").strip();
+        String effectiveSystemPrompt = explicitSystemPrompt.isBlank() ? customPrompt
+                : customPrompt.isBlank() ? explicitSystemPrompt : explicitSystemPrompt + "\n\n" + customPrompt;
+        AnalysisGuidance guidance = new AnalysisGuidance(effectiveSystemPrompt);
         AnalysisRequest.OutputLanguage outputLanguage = "en".equalsIgnoreCase(
                 System.getProperty("archscope.domainBenchmarkLanguage", "zh-CN"))
                 ? AnalysisRequest.OutputLanguage.ENGLISH
                 : AnalysisRequest.OutputLanguage.CHINESE;
         AnalysisRequest request = AnalysisRequest.businessDomain(repository, prompt, guidance, outputLanguage);
+        String cliWorkingDirectory = System.getProperty("archscope.domainCliWorkingDirectory", "").strip();
+        if (!cliWorkingDirectory.isEmpty()) {
+            request = request.withCliWorkingDirectory(Path.of(cliWorkingDirectory).toAbsolutePath().normalize());
+        }
         ProgressIndicator indicator = indicator();
         long startedAt = System.nanoTime();
         EvidencePack evidence = new GitEvidenceService().collectSnapshot(request, indicator);

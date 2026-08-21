@@ -12,6 +12,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.nio.file.Path;
 
 public final class DomainReportAssembler {
     private static final String SCHEMA = "closed-business-domain-analysis/v1";
@@ -28,7 +29,7 @@ public final class DomainReportAssembler {
             throw new ModelClientException("业务分析没有返回业务域或完整流程");
         }
 
-        Set<String> manifest = Set.copyOf(evidence.targetManifest());
+        Map<String, String> manifest = sourcePaths(evidence.targetManifest(), request);
         Map<String, Domain> domains = new LinkedHashMap<>();
         for (int index = 0; index < domainObjects.size(); index++) {
             JsonObject source = domainObjects.get(index);
@@ -68,7 +69,7 @@ public final class DomainReportAssembler {
                 String stepId = "domain-step-" + (flowIndex + 1) + "-" + (stepIndex + 1);
                 String sourceStepId = stableId(string(step, "id"), "step-" + (stepIndex + 1));
                 reportStepIds.put(sourceStepId, stepId);
-                String file = manifest.contains(string(step, "file")) ? string(step, "file") : "";
+                String file = sourceCodeFile(string(step, "file"), manifest);
                 int line = positiveInteger(step, "line", 1);
                 String evidenceKind = normalizeEvidence(string(step, "evidence"), file);
                 stepBindings.add(new StepBinding(
@@ -146,12 +147,16 @@ public final class DomainReportAssembler {
                 flowStep.addProperty("title", fallback(string(step, "title"), string(step, "symbol")));
                 flowStep.addProperty("summary", string(step, "summary"));
                 flowStep.addProperty("kind", normalizeFlowKind(string(step, "kind")));
+                flowStep.addProperty("main_path_label", string(step, "main_path_label"));
                 flowStep.addProperty("execution", execution);
                 flowStep.addProperty("lane_id", domain.laneId());
                 flowStep.addProperty("change_status", "context");
                 flowStep.add("commit_ids", new JsonArray());
                 flowStep.add("children", new JsonArray());
-                flowStep.add("branches", copy(array(step, "branches")));
+                flowStep.add("branches", validatedBranches(
+                        array(step, "branches"), manifest, sourceStepId,
+                        file, string(step, "symbol"), line, evidenceKind
+                ));
                 flowStep.add("contract_in_ids", new JsonArray());
                 flowStep.add("contract_out_ids", new JsonArray());
                 flowStep.add("source_node_ids", stepSourceNodeIds);
@@ -207,6 +212,20 @@ public final class DomainReportAssembler {
                 }
             }
 
+            for (JsonElement childElement : children) {
+                if (!childElement.isJsonObject()) continue;
+                JsonArray branches = array(childElement.getAsJsonObject(), "branches");
+                for (JsonElement branchElement : branches) {
+                    if (!branchElement.isJsonObject()) continue;
+                    JsonObject branch = branchElement.getAsJsonObject();
+                    String sourceTarget = string(branch, "target_step_id");
+                    if (sourceTarget.isBlank()) continue;
+                    String reportTarget = reportStepIds.get(sourceTarget);
+                    if (reportTarget != null) branch.addProperty("target_id", reportTarget);
+                    branch.remove("target_step_id");
+                }
+            }
+
             String primaryDomainId = usedDomainIds.iterator().next();
             JsonObject flowRoot = new JsonObject();
             flowRoot.addProperty("id", flowId);
@@ -224,6 +243,7 @@ public final class DomainReportAssembler {
             flowRoot.addProperty("data_subject", fallback(string(sourceFlow, "data_subject"), string(sourceFlow, "title")));
             JsonObject entrySource = sourceBackedObject(copyObject(sourceFlow, "entry_source"), manifest);
             remapStepReference(entrySource, "step_id", reportStepIds, stepBindings);
+            entrySource.addProperty("step_id", children.get(0).getAsJsonObject().get("id").getAsString());
             flowRoot.add("entry_source", entrySource);
             flowRoot.add("data_reads", copy(array(sourceFlow, "data_reads")));
             flowRoot.add("data_writes", copy(array(sourceFlow, "data_writes")));
@@ -234,6 +254,8 @@ public final class DomainReportAssembler {
             flowRoot.add("data_origins", origins);
             JsonArray dataFlow = sourceBackedItems(array(sourceFlow, "data_flow"), manifest);
             remapStepReferences(dataFlow, "step_id", reportStepIds, stepBindings);
+            backfillDataFlowSources(dataFlow, stepBindings);
+            normalizeDataFlow(dataFlow, children);
             flowRoot.add("data_flow", dataFlow);
             JsonArray consumerTargets = sourceBackedItems(array(sourceFlow, "consumer_targets"), manifest);
             remapStepReferences(consumerTargets, "after_step_id", reportStepIds, stepBindings);
@@ -401,14 +423,13 @@ public final class DomainReportAssembler {
         }
     }
 
-    private JsonArray sourceBackedItems(JsonArray values, Set<String> manifest) {
+    private JsonArray sourceBackedItems(JsonArray values, Map<String, String> manifest) {
         JsonArray result = new JsonArray();
         if (values == null) return result;
         for (JsonElement element : values) {
             if (!element.isJsonObject()) continue;
             JsonObject item = element.getAsJsonObject().deepCopy();
-            String file = string(item, "file").replace('\\', '/');
-            if (!manifest.contains(file)) file = "";
+            String file = sourceCodeFile(string(item, "file"), manifest);
             item.addProperty("file", file);
             item.addProperty("line", positiveInteger(item, "line", 1));
             result.add(item);
@@ -416,12 +437,84 @@ public final class DomainReportAssembler {
         return result;
     }
 
-    private JsonObject sourceBackedObject(JsonObject item, Set<String> manifest) {
-        String file = string(item, "file").replace('\\', '/');
-        if (!manifest.contains(file)) file = "";
+    private JsonObject sourceBackedObject(JsonObject item, Map<String, String> manifest) {
+        String file = sourceCodeFile(string(item, "file"), manifest);
         item.addProperty("file", file);
         item.addProperty("line", positiveInteger(item, "line", 1));
         return item;
+    }
+
+    private JsonArray validatedBranches(
+            JsonArray values,
+            Map<String, String> manifest,
+            String stepId,
+            String stepFile,
+            String stepSymbol,
+            int stepLine,
+            String stepEvidence
+    ) throws ModelClientException {
+        JsonArray result = new JsonArray();
+        if (values == null) return result;
+        for (JsonElement element : values) {
+            if (!element.isJsonObject()) continue;
+            JsonObject branch = element.getAsJsonObject().deepCopy();
+            String file = sourceCodeFile(string(branch, "file"), manifest);
+            String symbol = string(branch, "symbol");
+            String evidence = string(branch, "evidence");
+            if (file.isBlank()) file = stepFile;
+            if (symbol.isBlank()) symbol = stepSymbol;
+            if (!Set.of("direct_source", "source_backed_walkthrough").contains(evidence)) {
+                evidence = stepEvidence;
+            }
+            if (file.isBlank() || symbol.isBlank()
+                    || !Set.of("direct_source", "source_backed_walkthrough").contains(evidence)) {
+                throw new ModelClientException("业务步骤 " + stepId + " 的分支缺少真实源码证据");
+            }
+            branch.addProperty("file", file);
+            branch.addProperty("symbol", symbol);
+            branch.addProperty("line", positiveInteger(branch, "line", stepLine));
+            branch.addProperty("evidence", evidence);
+            result.add(branch);
+        }
+        return result;
+    }
+
+    private String sourceCodeFile(String raw, Map<String, String> manifest) {
+        String file = raw == null ? "" : raw.replace('\\', '/').strip();
+        while (file.startsWith("./")) file = file.substring(2);
+        String canonical = manifest.getOrDefault(file, "");
+        if (!canonical.isBlank() && DomainEvidencePlan.isAnalyzablePath(canonical)) return canonical;
+        String suffix = "/" + file;
+        List<String> matches = manifest.values().stream()
+                .filter(path -> !path.isBlank())
+                .distinct()
+                .filter(path -> path.endsWith(suffix) && DomainEvidencePlan.isAnalyzablePath(path))
+                .limit(2)
+                .toList();
+        return matches.size() == 1 ? matches.get(0) : "";
+    }
+
+    private Map<String, String> sourcePaths(List<String> paths, AnalysisRequest request) {
+        Map<String, String> aliases = new LinkedHashMap<>();
+        paths.forEach(path -> aliases.put(path.replace('\\', '/'), path.replace('\\', '/')));
+        if (request.cliWorkingDirectory() == null) return aliases;
+        try {
+            Path repository = request.repositoryRoot().toAbsolutePath().normalize();
+            Path workingDirectory = request.cliWorkingDirectory().toAbsolutePath().normalize();
+            if (!workingDirectory.startsWith(repository)) return aliases;
+            String prefix = repository.relativize(workingDirectory).toString().replace('\\', '/');
+            if (prefix.isBlank()) return aliases;
+            String prefixWithSlash = prefix + "/";
+            for (String path : paths) {
+                String normalized = path.replace('\\', '/');
+                if (!normalized.startsWith(prefixWithSlash)) continue;
+                String local = normalized.substring(prefixWithSlash.length());
+                aliases.merge(local, normalized, (first, second) -> first.equals(second) ? first : "");
+            }
+        } catch (RuntimeException ignored) {
+            // A custom working directory outside the repository has no stable repository-relative prefix.
+        }
+        return aliases;
     }
 
     private void remapStepReferences(
@@ -469,6 +562,27 @@ public final class DomainReportAssembler {
         return candidates.stream().min(java.util.Comparator
                 .comparingInt((StepBinding binding) -> Math.abs(binding.line() - line))
                 .thenComparing(StepBinding::sourceId)).orElseThrow();
+    }
+
+    private void backfillDataFlowSources(JsonArray dataFlow, List<StepBinding> stepBindings) {
+        Map<String, StepBinding> bindingsByReportId = new LinkedHashMap<>();
+        stepBindings.forEach(binding -> bindingsByReportId.put(binding.reportId(), binding));
+        for (JsonElement element : dataFlow) {
+            if (!element.isJsonObject()) continue;
+            JsonObject hop = element.getAsJsonObject();
+            StepBinding binding = bindingsByReportId.get(string(hop, "step_id"));
+            boolean inheritedFile = string(hop, "file").isBlank()
+                    && binding != null && !binding.file().isBlank();
+            if (inheritedFile) {
+                hop.addProperty("file", binding.file());
+                hop.addProperty("line", binding.line());
+            }
+            if (string(hop, "symbol").isBlank() && binding != null && !binding.symbol().isBlank()) {
+                hop.addProperty("symbol", binding.symbol());
+            }
+            String file = string(hop, "file");
+            hop.addProperty("evidence", normalizeEvidence(string(hop, "evidence"), file));
+        }
     }
 
     private JsonArray filteredStrings(JsonArray values, Set<String> allowed) {
@@ -655,6 +769,29 @@ public final class DomainReportAssembler {
 
     private String normalizeExecution(String value) {
         return "async_continuation".equals(value) ? value : "same_execution";
+    }
+
+    private void normalizeDataFlow(JsonArray dataFlow, JsonArray steps) {
+        Map<String, String> executionByStep = new LinkedHashMap<>();
+        for (JsonElement element : steps) {
+            if (!element.isJsonObject()) continue;
+            JsonObject step = element.getAsJsonObject();
+            executionByStep.put(string(step, "id"), normalizeExecution(string(step, "execution")));
+        }
+        Map<String, Integer> orderByLineage = new LinkedHashMap<>();
+        for (JsonElement element : dataFlow) {
+            if (!element.isJsonObject()) continue;
+            JsonObject hop = element.getAsJsonObject();
+            String lineageId = string(hop, "lineage_id");
+            int order = orderByLineage.merge(lineageId, 1, Integer::sum);
+            hop.addProperty("order", order);
+            hop.addProperty("timing", executionByStep.getOrDefault(
+                    string(hop, "step_id"), normalizeExecution(string(hop, "timing"))));
+            if (!Set.of("ingest", "validate", "transform", "persist", "deliver")
+                    .contains(string(hop, "phase"))) {
+                hop.addProperty("phase", order == 1 ? "ingest" : "transform");
+            }
+        }
     }
 
     private String normalizeFlowType(String value) {

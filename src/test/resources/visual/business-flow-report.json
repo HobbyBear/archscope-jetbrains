@@ -1,0 +1,44 @@
+{
+  "title": "聊天请求主流程",
+  "summary": "用户问题经过校验、模型处理并返回客户端",
+  "output_language": "zh-CN",
+  "comparison": { "mode": "current_snapshot", "target_commit": "0123456789abcdef" },
+  "business_overview": { "purpose": "解释聊天请求如何得到回答" },
+  "business_domains": [],
+  "nodes": [],
+  "unknowns": [],
+  "flow_map": {
+    "id": "root",
+    "execution": "independent",
+    "children": [{
+      "id": "chat-flow",
+      "title": "发送聊天消息",
+      "summary": "从客户端提交问题到收到回答",
+      "actor": "用户",
+      "trigger": "客户端提交聊天问题",
+      "outcome": "客户端收到完整回答",
+      "data_subject": "聊天请求",
+      "entry_source": { "entry_kind": "route" },
+      "data_flow": [
+        { "step_id": "validate", "phase": "validate", "data": "用户问题", "via": "call", "order": 1 },
+        { "step_id": "model", "phase": "transform", "data": "模型回答", "via": "http", "order": 2 },
+        { "step_id": "deliver", "phase": "deliver", "data": "完整回答", "via": "websocket", "order": 3 }
+      ],
+      "children": [
+        {
+          "id": "validate",
+          "title": "校验聊天请求",
+          "summary": "检查问题内容和用户上下文",
+          "kind": "decision",
+          "main_path_label": "校验通过",
+          "branches": [
+            { "label": "内容无效", "meaning": "拒绝当前请求并返回错误", "outcome": "failure" },
+            { "label": "需要补充", "meaning": "补齐上下文后继续", "outcome": "continue", "target_step_id": "model" }
+          ]
+        },
+        { "id": "model", "title": "调用模型生成回答", "summary": "发送上下文并消费模型结果", "relation_kind": "http", "main_path_label": "生成完成", "branches": [] },
+        { "id": "deliver", "title": "向客户端交付回答", "summary": "通过 WebSocket 返回最终内容", "relation_kind": "websocket", "branches": [] }
+      ]
+    }]
+  }
+}

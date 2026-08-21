@@ -34,12 +34,21 @@ public record DomainEvidencePlan(
         } catch (RuntimeException exception) {
             root = parseTextSlots(raw);
         }
-        if (!SCHEMA.equals(string(root, "schema"))) {
-            throw new ModelClientException("业务证据计划 schema 无效");
+        boolean recognizedPlan = SCHEMA.equals(string(root, "schema"));
+        JsonObject recovered = recoverLoosePlan(raw, evidence);
+        root.addProperty("schema", SCHEMA);
+        if (!recognizedPlan) {
+            mergeRecoveredArray(root, recovered, "candidate_paths");
+            mergeRecoveredArray(root, recovered, "queries");
+            mergeRecoveredArray(root, recovered, "likely_domains");
+        }
+        if (!root.has("refinement_intent") || !root.get("refinement_intent").isJsonObject()) {
+            root.add("refinement_intent", recovered.getAsJsonObject("refinement_intent"));
         }
         Set<String> manifest = Set.copyOf(evidence.targetManifest());
         List<String> paths = strings(array(root, "candidate_paths")).stream()
-                .filter(manifest::contains)
+                .map(path -> resolveManifestPath(path, manifest))
+                .filter(path -> !path.isBlank())
                 .filter(DomainEvidencePlan::isAnalyzablePath)
                 .distinct()
                 .limit(8)
@@ -59,7 +68,7 @@ public record DomainEvidencePlan(
             }
         }
         EditIntent editIntent = EditIntent.parse(root);
-        if (paths.isEmpty() && queries.isEmpty() && editIntent.evidenceRequired()) {
+        if (paths.isEmpty() && editIntent.evidenceRequired()) {
             paths = evidence.targetManifest().stream()
                     .filter(DomainEvidencePlan::isAnalyzablePath)
                     .limit(6)
@@ -84,7 +93,7 @@ public record DomainEvidencePlan(
         return new DomainEvidencePlan(root.toString(), paths, List.copyOf(queries), editIntent);
     }
 
-    private static JsonObject parseTextSlots(String raw) throws ModelClientException {
+    private static JsonObject parseTextSlots(String raw) {
         JsonObject root = new JsonObject();
         JsonObject intent = new JsonObject();
         JsonArray operations = new JsonArray();
@@ -96,9 +105,9 @@ public record DomainEvidencePlan(
         JsonArray queries = new JsonArray();
         JsonArray domains = new JsonArray();
         for (String line : (raw == null ? "" : raw).lines().toList()) {
-            if (line.isBlank()) continue;
-            String[] fields = line.split("\\t", 4);
-            String key = fields[0].strip().toUpperCase(java.util.Locale.ROOT);
+            String[] fields = textSlotFields(line);
+            if (fields.length == 0) continue;
+            String key = normalizeSlotKey(fields[0]);
             String value = fields.length > 1 ? fields[1].strip() : "";
             switch (key) {
                 case "SCHEMA" -> root.addProperty("schema", value);
@@ -129,9 +138,8 @@ public record DomainEvidencePlan(
                 default -> { }
             }
         }
-        if (!SCHEMA.equals(string(root, "schema"))) {
-            throw new ModelClientException("模型没有返回可识别的业务证据计划文本槽位");
-        }
+        if (operations.isEmpty()) operations.add("initial");
+        if (!intent.has("evidence_required")) intent.addProperty("evidence_required", true);
         intent.add("operations", operations);
         intent.add("target_domain_ids", domainIds);
         intent.add("target_flow_ids", flowIds);
@@ -142,6 +150,130 @@ public record DomainEvidencePlan(
         root.add("candidate_paths", paths);
         root.add("queries", queries);
         return root;
+    }
+
+    private static String[] textSlotFields(String rawLine) {
+        if (rawLine == null) return new String[0];
+        String line = rawLine.strip().replace("\\t", "\t");
+        if (line.isBlank() || line.startsWith("```")) return new String[0];
+        line = line.replace("**", "").replace("`", "").strip();
+        line = line.replaceFirst("^[-*+]\\s+", "").strip();
+        if (line.contains("\t")) return line.split("\t", 4);
+
+        boolean markdownRow = line.startsWith("|");
+        if (markdownRow) line = line.substring(1).strip();
+        if (line.endsWith("|")) line = line.substring(0, line.length() - 1).strip();
+        if (markdownRow || line.matches("(?i)^[A-Z_]+\\s*\\|.*")) {
+            return line.split("\\s*\\|\\s*", 4);
+        }
+
+        Matcher delimited = Pattern.compile("^([A-Za-z_]+)\\s*[:：=]\\s*(.*)$").matcher(line);
+        if (delimited.matches()) {
+            String[] values = delimited.group(2).split("\\s*\\|\\s*", 3);
+            String[] fields = new String[Math.min(4, values.length + 1)];
+            fields[0] = delimited.group(1);
+            System.arraycopy(values, 0, fields, 1, fields.length - 1);
+            return fields;
+        }
+        return new String[0];
+    }
+
+    private static String normalizeSlotKey(String value) {
+        return value.strip()
+                .replace("\"", "")
+                .replace("'", "")
+                .replace("#", "")
+                .strip()
+                .toUpperCase(java.util.Locale.ROOT);
+    }
+
+    private static JsonObject recoverLoosePlan(String raw, EvidencePack evidence) {
+        JsonObject root = new JsonObject();
+        root.addProperty("schema", SCHEMA);
+        JsonObject intent = new JsonObject();
+        JsonArray operations = new JsonArray();
+        operations.add("initial");
+        intent.add("operations", operations);
+        intent.add("target_domain_ids", new JsonArray());
+        intent.add("target_flow_ids", new JsonArray());
+        intent.add("target_step_ids", new JsonArray());
+        intent.add("requested_topics", new JsonArray());
+        intent.addProperty("evidence_required", true);
+        root.add("refinement_intent", intent);
+        root.add("likely_domains", new JsonArray());
+
+        String response = raw == null ? "" : raw.replace('\\', '/');
+        String lowerResponse = response.toLowerCase(java.util.Locale.ROOT);
+        java.util.LinkedHashMap<String, Integer> basenameCounts = new java.util.LinkedHashMap<>();
+        for (String path : evidence.targetManifest()) {
+            String normalized = path.replace('\\', '/');
+            String basename = normalized.substring(normalized.lastIndexOf('/') + 1).toLowerCase(java.util.Locale.ROOT);
+            basenameCounts.merge(basename, 1, Integer::sum);
+        }
+        JsonArray paths = new JsonArray();
+        for (String path : evidence.targetManifest()) {
+            if (!isAnalyzablePath(path)) continue;
+            String normalized = path.replace('\\', '/');
+            String lowerPath = normalized.toLowerCase(java.util.Locale.ROOT);
+            String basename = lowerPath.substring(lowerPath.lastIndexOf('/') + 1);
+            boolean exactPath = lowerResponse.contains(lowerPath);
+            boolean uniqueBasename = basename.length() >= 5
+                    && basenameCounts.getOrDefault(basename, 0) == 1
+                    && lowerResponse.contains(basename);
+            if (exactPath || uniqueBasename) paths.add(path);
+            if (paths.size() == 8) break;
+        }
+        root.add("candidate_paths", paths);
+
+        MapWithOrder identifiers = new MapWithOrder();
+        Matcher matcher = IDENTIFIER.matcher(response);
+        while (matcher.find()) {
+            String identifier = matcher.group();
+            if (isUsefulIdentifier(identifier) && !isPlanningKeyword(identifier)) {
+                identifiers.add(identifier, identifierScore(identifier));
+            }
+        }
+        JsonArray queries = new JsonArray();
+        for (String identifier : identifiers.sorted()) {
+            JsonObject query = new JsonObject();
+            query.addProperty("literal", identifier);
+            query.addProperty("role", "state");
+            query.addProperty("reason", "从模型返回的非标准计划中恢复源码符号");
+            queries.add(query);
+            if (queries.size() == 8) break;
+        }
+        root.add("queries", queries);
+        return root;
+    }
+
+    private static boolean isPlanningKeyword(String value) {
+        return Set.of(
+                "schema", "topic", "operations", "refinement_intent", "target_domain_ids",
+                "target_flow_ids", "target_step_ids", "requested_topics", "evidence_required",
+                "likely_domain", "likely_domains", "candidate_path", "candidate_paths", "query",
+                "queries", "literal", "role", "reason", "purpose"
+        ).contains(value.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private static void mergeRecoveredArray(JsonObject root, JsonObject recovered, String name) {
+        JsonArray existing = array(root, name);
+        if (existing == null || existing.isEmpty()) root.add(name, recovered.getAsJsonArray(name));
+    }
+
+    private static String resolveManifestPath(String rawPath, Set<String> manifest) {
+        String path = rawPath == null ? "" : rawPath.strip()
+                .replace('\\', '/')
+                .replace("`", "")
+                .replace("\"", "")
+                .replace("'", "");
+        while (path.startsWith("./")) path = path.substring(2);
+        if (manifest.contains(path)) return path;
+        String suffix = "/" + path;
+        List<String> matches = manifest.stream()
+                .filter(candidate -> candidate.replace('\\', '/').endsWith(suffix))
+                .limit(2)
+                .toList();
+        return matches.size() == 1 ? matches.get(0) : "";
     }
 
     private static void addCsv(JsonArray target, String value) {
@@ -402,14 +534,20 @@ public record DomainEvidencePlan(
 
     static boolean isAnalyzablePath(String path) {
         String lower = path.replace('\\', '/').toLowerCase(java.util.Locale.ROOT);
-        return !lower.contains("/.repomind/")
-                && !lower.startsWith("graphify-out/")
+        return !lower.startsWith("graphify-out/")
                 && !lower.contains("/graphify-out/")
                 && !lower.contains("/vendor/")
                 && !lower.contains("/node_modules/")
                 && !lower.contains("/dist/")
                 && !lower.contains("/build/")
                 && !lower.endsWith(".min.js")
+                && !lower.endsWith(".md")
+                && !lower.endsWith(".mdx")
+                && !lower.endsWith(".rst")
+                && !lower.endsWith(".adoc")
+                && !lower.endsWith(".txt")
+                && !lower.endsWith(".html")
+                && !lower.endsWith(".htm")
                 && !lower.endsWith(".lock")
                 && !lower.endsWith(".sum");
     }

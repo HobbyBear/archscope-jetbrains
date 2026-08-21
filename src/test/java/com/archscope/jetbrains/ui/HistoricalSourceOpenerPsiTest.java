@@ -30,7 +30,7 @@ public final class HistoricalSourceOpenerPsiTest extends LightPlatformTestCase {
         assertTrue(target.getTextRange().getStartOffset() > file.getText().indexOf("\"review\""));
     }
 
-    public void testDoesNotFallBackToANearbyDeclarationWhenSymbolIsMissing() {
+    public void testFallsBackToTheRecordedCurrentWorkspaceLineWhenSymbolIsMissing() {
         PsiFile file = psiFile("""
                 {
                   "first": true,
@@ -38,7 +38,10 @@ public final class HistoricalSourceOpenerPsiTest extends LightPlatformTestCase {
                 }
                 """);
 
-        assertNull(HistoricalSourceOpener.findPsiTarget(file, document(file), 3, "Service#deleted()"));
+        PsiElement target = HistoricalSourceOpener.findPsiTarget(file, document(file), 3, "Service#deleted()");
+
+        assertNotNull(target);
+        assertEquals(2, document(file).getLineNumber(target.getTextOffset()));
     }
 
     public void testUsesTheRecordedLineToDisambiguateOverloadsWithinOneFile() {

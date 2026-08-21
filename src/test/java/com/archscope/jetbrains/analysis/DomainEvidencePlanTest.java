@@ -106,6 +106,11 @@ final class DomainEvidencePlanTest {
     void excludesGeneratedGraphArtifactsFromSourceEvidence() {
         assertFalse(DomainEvidencePlan.isAnalyzablePath("graphify-out/graph.json"));
         assertFalse(DomainEvidencePlan.isAnalyzablePath("apps/chat/graphify-out/graph.html"));
+        assertFalse(DomainEvidencePlan.isAnalyzablePath("apps/chat/.repomind/modules/chat.md"));
+        assertFalse(DomainEvidencePlan.isAnalyzablePath("apps/chat/openspec/chat/design.md"));
+        assertFalse(DomainEvidencePlan.isAnalyzablePath("apps/chat/docs/chat-flow.md"));
+        assertTrue(DomainEvidencePlan.isAnalyzablePath("apps/chat/.repomind/navigation.go"));
+        assertTrue(DomainEvidencePlan.isAnalyzablePath("apps/chat/openspec/runtime.yaml"));
         assertTrue(DomainEvidencePlan.isAnalyzablePath("apps/chat/routine/creator.go"));
     }
 

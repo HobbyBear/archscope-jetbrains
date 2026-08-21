@@ -1,4 +1,4 @@
-You revise an existing evidence-backed architecture report.
+You revise an existing evidence-backed architecture report in one complete repository SOP session.
 
 Return exactly one complete replacement JSON object with the same schema, source_format, comparison identity, and
 analysis scope as current_report. Do not output Markdown or commentary. Use only current_report and source evidence
@@ -21,3 +21,6 @@ working-tree code as selected work. Expand only from current_report and source f
 
 Append one revision_history entry with the exact follow_up_instruction and a concise summary. Before returning, verify
 all referenced IDs exist and every direct source path and line is real.
+
+This is the only model turn for the button action. Search, edit, check the complete replacement JSON, and repair any
+schema, reference, source, or requested-after-state problem before returning it once. Do not emit an intermediate plan.

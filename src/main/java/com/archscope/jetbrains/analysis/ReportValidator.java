@@ -341,6 +341,10 @@ public final class ReportValidator {
                             "continue", "success", "failure", "cancel", "terminal")) {
                         errors.add("业务步骤 " + stepId + " 的分支 outcome 非法");
                     }
+                    String targetStepId = string(branch, "target_step_id");
+                    if (targetStepId != null && !targetStepId.isBlank() && !stepIds.contains(targetStepId)) {
+                        errors.add("业务步骤 " + stepId + " 的分支指向不存在的 target_step_id：" + targetStepId);
+                    }
                 }
             }
         }
@@ -417,11 +421,16 @@ public final class ReportValidator {
                 if (string(hop, "plain_action") == null || string(hop, "plain_action").isBlank()) {
                     errors.add("数据环节 " + hopId + " 缺少白话动作说明");
                 }
+                for (String field : List.of("data", "from", "to", "via", "transformation", "storage")) {
+                    if (string(hop, field) == null || string(hop, field).isBlank()) {
+                        errors.add("数据环节 " + hopId + " 缺少方向字段 " + field);
+                    }
+                }
                 int order = integer(hop, "order", -1);
                 if (order < 1 || !ordersByLineage.computeIfAbsent(lineageId, ignored -> new HashSet<>()).add(order)) {
                     errors.add("数据环节 " + hopId + " 的 order 无效或在同一血缘中重复");
                 }
-                validateBusinessSource(hop, "数据环节 " + hopId, evidence, repositoryRoot, false, errors);
+                validateBusinessSource(hop, "数据环节 " + hopId, evidence, repositoryRoot, true, errors);
             }
         }
         Set<Integer> primaryOrders = ordersByLineage.getOrDefault(primaryOriginId, Set.of());
@@ -477,6 +486,10 @@ public final class ReportValidator {
         }
         if (!evidence.targetManifest().contains(file)) {
             errors.add(label + " 引用了目标快照中不存在的文件：" + file);
+            return;
+        }
+        if (!DomainEvidencePlan.isAnalyzablePath(file)) {
+            errors.add(label + " 引用了文档或生成内容而不是真实源码：" + file);
             return;
         }
         if (SensitiveTextSanitizer.isSensitivePath(file)) {

@@ -6,25 +6,24 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 public record AnalysisGuidance(
-        String customInstructions,
-        String additionalSystemPrompt
+        String systemPrompt
 ) {
-    public static final AnalysisGuidance EMPTY = new AnalysisGuidance("", "");
+    public static final AnalysisGuidance EMPTY = new AnalysisGuidance("");
 
     public AnalysisGuidance {
-        customInstructions = normalize(customInstructions, 16_000);
-        additionalSystemPrompt = normalize(additionalSystemPrompt, 8_000);
+        // Both supported CLIs receive this through their native high-priority instruction channel.
+        // Keep the combined Windows command line below CreateProcess' limit.
+        systemPrompt = normalize(systemPrompt, 4_000);
     }
 
     public boolean isEmpty() {
-        return customInstructions.isBlank() && additionalSystemPrompt.isBlank();
+        return systemPrompt.isBlank();
     }
 
     public String fingerprint() {
         try {
-            String value = String.join("\n\u001f\n", customInstructions, additionalSystemPrompt);
             byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8));
+                    .digest(systemPrompt.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(digest, 0, 12);
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is unavailable", exception);

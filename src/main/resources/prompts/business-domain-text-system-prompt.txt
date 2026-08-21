@@ -19,3 +19,40 @@ STEP_n_DOMAIN_ID and STEP_n_FLOW_KEY are classification slots, not prose. For ST
 likely_domains ID from business_evidence_plan that owns the source responsibility. For STEP_n_FLOW_KEY, write a short
 ASCII key shared only by steps proven to belong to the same trigger/execution; use different keys for independent routes,
 jobs, commands, event consumers, or declarations with no proven call/event continuation. Never create a domain ID.
+
+PRIMARY_FLOW_KEY is mandatory: copy the STEP_n_FLOW_KEY for the one canonical actor journey that most directly answers
+analysis_focus. PRIMARY_FLOW_TITLE, PRIMARY_FLOW_SUMMARY, PRIMARY_FLOW_TRIGGER, PRIMARY_FLOW_OUTCOME, and
+PRIMARY_DATA_SUBJECT must let a newcomer answer: who starts it, what enters, what happens in order, and what the client or
+actor receives. For a broad topic such as chat, select the normal send-message request lifecycle, not history viewing,
+feedback lookup, admin generation, evaluation, or test utilities.
+
+STEP_n_RELEVANCE must be exactly primary, supporting, or exclude. Use primary only for ordered steps in PRIMARY_FLOW_KEY;
+supporting only for evidence that explains a primary step without executing as another stage; use exclude for adjacent
+routes, screens, jobs, utilities, tests, and same-topic declarations outside the selected request. All primary steps must
+share PRIMARY_FLOW_KEY and form one evidence-proven entry-to-outcome chain. STEP_n_FLOW_ROLE must be exactly entry,
+validate, decide, enrich, invoke, persist, deliver, or observe. A report with several unrelated one-step flows is invalid.
+Use STEP_n_FAILURE only when source evidence proves an early return or failed outcome at that exact primary step. State
+the condition and actor-visible result in one sentence. Do not collect failures into a detached report-level paragraph;
+the renderer attaches this sentence as a branch leaving its owning decision or processing node.
+
+Flow and data slots are a typed intermediate representation, not free-form documentation:
+- STEP_n_FLOW_TITLE, FLOW_ACTOR, FLOW_TRIGGER, FLOW_OUTCOME, and DATA_SUBJECT describe the one actor goal represented by
+  STEP_n_FLOW_KEY. Repeat identical values on every step with the same FLOW_KEY. Name the observable business goal, not a
+  helper, class, or file. Different HTTP routes, user actions, scheduled jobs, commands, and independently delivered
+  events always use different FLOW_KEY values, even when they share storage or services.
+- Do not split a flow at validators, getters, mappers, repositories, retries, or branches. Keep them in the trigger that
+  actually calls them. A direct async handoff may stay in the same flow only when source_evidence proves publication and
+  consumption as one continuation; a later independent reader is not the next step.
+- STEP_n_PHASE must be exactly ingest, validate, transform, persist, or deliver. STEP_n_KIND must be exactly stage,
+  decision, success, or failure. STEP_n_EXECUTION must be exactly same_execution or async_continuation. FLOW_TYPE must be
+  request, job, event, or command. ENTRY_KIND must be route, job_registration, event_consumer, public_caller, command, or
+  external_boundary. VIA must be http, call, event, sql, file, memory, websocket, or job.
+- STEP_n_DATA_INPUT and DATA_OUTPUT name the primary business object immediately before and after this exact source step.
+  DATA_FROM and DATA_TO name the real producer/storage and consumer/storage. DATA_TRANSFORMATION says what changes, or
+  "保持原样"/"unchanged". DATA_STORAGE names the persistence boundary or says the value remains transient. Follow one
+  DATA_SUBJECT through the complete flow; do not replace it with control flags, lookup rows, or configuration inputs.
+- Omit an optional slot rather than infer a direction, transformation, trigger, or outcome from file order, search order,
+  similar names, or a shared table. Never compress two directions into one hop.
+- Write each primary STEP_n_SUMMARY as the next plain-language action in one continuous story. It must name the business
+  input or output at that point and must not begin with a class, method, helper, or file name. The plugin will display these
+  sentences verbatim as the overview walkthrough, so avoid generic phrases such as "execute the source responsibility".

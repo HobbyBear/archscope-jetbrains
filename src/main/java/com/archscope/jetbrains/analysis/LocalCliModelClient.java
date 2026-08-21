@@ -10,6 +10,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,6 +27,15 @@ import java.util.function.Consumer;
 public final class LocalCliModelClient implements ModelClient {
     private static final Logger LOG = Logger.getInstance(LocalCliModelClient.class);
     private static final Duration MAX_RUNTIME = Duration.ofMinutes(30);
+    private final ModelRunAuditLog auditLog;
+
+    public LocalCliModelClient() {
+        this(new ModelRunAuditLog());
+    }
+
+    LocalCliModelClient(ModelRunAuditLog auditLog) {
+        this.auditLog = auditLog;
+    }
 
     @Override
     public String id() {
@@ -72,7 +82,7 @@ public final class LocalCliModelClient implements ModelClient {
                 indicator,
                 stage,
                 statusListener,
-                WorkspaceAccess.CLOSED_EVIDENCE
+                WorkspaceAccess.CURRENT_REPOSITORY
         );
     }
 
@@ -86,20 +96,49 @@ public final class LocalCliModelClient implements ModelClient {
             Consumer<String> statusListener,
             WorkspaceAccess workspaceAccess
     ) throws ModelClientException {
+        return complete(systemPrompt, userPrompt, workingDirectory, indicator, stage, statusListener,
+                workspaceAccess, ignored -> {});
+    }
+
+    @Override
+    public String complete(
+            String systemPrompt,
+            String userPrompt,
+            Path workingDirectory,
+            ProgressIndicator indicator,
+            String stage,
+            Consumer<String> statusListener,
+            WorkspaceAccess workspaceAccess,
+            Consumer<ModelStreamEvent> streamListener
+    ) throws ModelClientException {
         Process process = null;
+        Path outputSchemaFile = null;
+        Path finalMessageFile = null;
         long startedAt = System.nanoTime();
+        int resultChars = -1;
+        ModelRunAuditLog.Run audit = auditLog.start(
+                id(), stage, workingDirectory, workspaceAccess, systemPrompt, userPrompt);
         try {
-            List<String> command = command(stage, workspaceAccess);
+            if (isBusinessDomainSopStage(stage)) {
+                outputSchemaFile = copyResourceToTempFile(
+                        "/prompts/business-domain-output-schema.json", "codebecause-business-schema-", ".json");
+            }
+            finalMessageFile = Files.createTempFile("codebecause-codex-final-", ".txt");
+            List<String> command = command(
+                    stage, workspaceAccess, systemPrompt, outputSchemaFile, finalMessageFile);
             ProcessBuilder builder = processBuilder(command, workingDirectory);
             process = builder.start();
             updateProgress(indicator, statusListener, PluginLanguage.text("本机 Codex · ", "Local Codex · ") + stage);
-            LOG.info("Local Codex started: stage=" + stage + ", executable=" + command.get(0));
+            streamListener.accept(ModelStreamEvent.status(
+                    PluginLanguage.text("本机 Codex · ", "Local Codex · ") + stage));
+            LOG.info("Local Codex started: stage=" + stage + ", executable=" + command.get(0)
+                    + ", workingDirectory=" + workingDirectory.toAbsolutePath().normalize());
 
-            String prompt = systemPrompt + "\n\nUSER EVIDENCE REQUEST:\n" + userPrompt;
+            String prompt = stdinPrompt("", userPrompt, workspaceAccess);
             try (OutputStreamWriter writer = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8)) {
                 writer.write(prompt);
             } catch (IOException writeFailure) {
-                String earlyOutput = readOutput(process, indicator, stage, statusListener);
+                String earlyOutput = readOutput(process, indicator, stage, statusListener, streamListener, audit);
                 if (!earlyOutput.isBlank()) {
                     throw new ModelClientException(
                             PluginLanguage.text("本机 Codex 在接收提示词前退出：",
@@ -112,19 +151,20 @@ public final class LocalCliModelClient implements ModelClient {
 
             Process runningProcess = process;
             CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(
-                    () -> readOutput(runningProcess, indicator, stage, statusListener)
+                    () -> readOutput(runningProcess, indicator, stage, statusListener, streamListener, audit)
             );
-            long deadline = System.nanoTime() + MAX_RUNTIME.toNanos();
+            Duration maxRuntime = workspaceAccess == WorkspaceAccess.READ_ONLY_REPOSITORY ? null : MAX_RUNTIME;
+            long deadline = maxRuntime == null ? Long.MAX_VALUE : System.nanoTime() + maxRuntime.toNanos();
             long lastProgressSecond = -5;
             while (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
                 if (indicator.isCanceled()) {
                     terminate(process);
                     indicator.checkCanceled();
                 }
-                if (System.nanoTime() > deadline) {
+                if (maxRuntime != null && System.nanoTime() > deadline) {
                     terminate(process);
-                    throw new ModelClientException(PluginLanguage.text("本机 Codex 执行超过 30 分钟，已终止",
-                            "Local Codex exceeded 30 minutes and was terminated"));
+                    throw new ModelClientException(PluginLanguage.text("本机 Codex 执行超过 ", "Local Codex exceeded ")
+                            + maxRuntime.toMinutes() + PluginLanguage.text(" 分钟，已终止", " minutes and was terminated"));
                 }
                 long elapsedSeconds = (System.nanoTime() - startedAt) / 1_000_000_000;
                 if (elapsedSeconds >= lastProgressSecond + 5) {
@@ -141,7 +181,10 @@ public final class LocalCliModelClient implements ModelClient {
                                 + abbreviate(output, 2400)
                 );
             }
-            String result = extractResult(output);
+            String result = Files.readString(finalMessageFile, StandardCharsets.UTF_8).strip();
+            if (result.isBlank()) result = extractResult(output);
+            audit.recordResult(result);
+            resultChars = result.length();
             LOG.info("Local Codex completed: stage=" + stage + ", outputChars=" + result.length());
             LOG.info("Local Codex timing: stage=" + stage + ", promptChars=" + prompt.length()
                     + ", elapsedMs=" + ((System.nanoTime() - startedAt) / 1_000_000));
@@ -166,6 +209,11 @@ public final class LocalCliModelClient implements ModelClient {
             );
         } finally {
             if (process != null && process.isAlive()) terminate(process);
+            deleteTemporaryFile(outputSchemaFile, "Codex output schema");
+            deleteTemporaryFile(finalMessageFile, "Codex final message");
+            audit.finish(resultChars >= 0 ? "completed" : "failed",
+                    (System.nanoTime() - startedAt) / 1_000_000L, Math.max(0, resultChars));
+            audit.close();
         }
     }
 
@@ -174,49 +222,143 @@ public final class LocalCliModelClient implements ModelClient {
     }
 
     List<String> command(String stage) {
-        return command(stage, WorkspaceAccess.CLOSED_EVIDENCE);
+        return command(stage, WorkspaceAccess.CURRENT_REPOSITORY);
     }
 
     List<String> command(String stage, WorkspaceAccess workspaceAccess) {
+        return command(stage, workspaceAccess, "");
+    }
+
+    List<String> command(String stage, WorkspaceAccess workspaceAccess, String developerInstructions) {
+        return command(stage, workspaceAccess, developerInstructions, null, null);
+    }
+
+    List<String> command(
+            String stage,
+            WorkspaceAccess workspaceAccess,
+            String developerInstructions,
+            Path outputSchemaFile,
+            Path finalMessageFile
+    ) {
         boolean windows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
         if (windows) {
             String appData = System.getenv("APPDATA");
             if (appData != null) {
                 Path script = Path.of(appData, "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
                 if (Files.isRegularFile(script)) {
-                    return codexCommand(List.of("node", script.toString()), stage, workspaceAccess);
+                    return codexCommand(List.of("node", script.toString()), stage, workspaceAccess,
+                            developerInstructions, outputSchemaFile, finalMessageFile);
                 }
             }
         }
-        return codexCommand(List.of("codex"), stage, workspaceAccess);
+        return codexCommand(CliCommandResolver.resolve(
+                "codex", "archscope.codexCliPath", "CODEX_CLI_PATH"
+        ), stage, workspaceAccess, developerInstructions, outputSchemaFile, finalMessageFile);
     }
 
     ProcessBuilder processBuilder(List<String> command, Path workingDirectory) {
         ProcessBuilder builder = new ProcessBuilder(command)
                 .directory(workingDirectory.toFile())
                 .redirectErrorStream(true);
-        // IDE launchers can inject bundled native libraries that are incompatible with
-        // external Node-based CLIs. Let Codex resolve the same libraries as a terminal does.
-        builder.environment().remove("LD_LIBRARY_PATH");
+        // GUI-launched IDEs on macOS do not reliably inherit the user's terminal PATH.
+        // Also keep IDE-bundled native libraries away from external Node-based CLIs.
+        CliCommandResolver.configureEnvironment(builder);
         return builder;
     }
 
-    private List<String> codexCommand(List<String> prefix, String stage, WorkspaceAccess workspaceAccess) {
+    private List<String> codexCommand(
+            List<String> prefix,
+            String stage,
+            WorkspaceAccess workspaceAccess,
+            String developerInstructions,
+            Path outputSchemaFile,
+            Path finalMessageFile
+    ) {
         List<String> command = new ArrayList<>(prefix);
-        String reasoningEffort = isStructuredBusinessStage(stage) ? "low" : "medium";
+        String reasoningEffort = workspaceAccess == WorkspaceAccess.READ_ONLY_REPOSITORY
+                || isStructuredBusinessStage(stage) ? "low" : "medium";
+        String effectiveInstructions = developerInstructions;
         command.add("exec");
         command.add("--skip-git-repo-check");
         command.add("--ephemeral");
         if (workspaceAccess == WorkspaceAccess.READ_ONLY_REPOSITORY) {
             command.addAll(List.of("--sandbox", "read-only"));
         }
+        if (!effectiveInstructions.isBlank()) {
+            command.add("-c");
+            command.add("developer_instructions=" + tomlString(effectiveInstructions));
+        }
         command.addAll(List.of(
                 "-c",
-                "model_reasoning_effort=\"" + reasoningEffort + "\"",
-                "--json",
-                "-"
+                "model_reasoning_effort=\"" + reasoningEffort + "\""
         ));
+        if (outputSchemaFile != null) {
+            command.add("--output-schema");
+            command.add(outputSchemaFile.toString());
+        }
+        if (finalMessageFile != null) {
+            command.add("--output-last-message");
+            command.add(finalMessageFile.toString());
+        }
+        command.addAll(List.of("--json", "-"));
         return List.copyOf(command);
+    }
+
+    private boolean isBusinessDomainSopStage(String stage) {
+        return stage.contains("业务分析 SOP")
+                || stage.contains("报告修改 SOP")
+                || stage.contains("business-analysis SOP")
+                || stage.contains("report-refinement SOP");
+    }
+
+    private Path copyResourceToTempFile(String resource, String prefix, String suffix) throws IOException {
+        try (InputStream input = LocalCliModelClient.class.getResourceAsStream(resource)) {
+            if (input == null) throw new IOException("Missing resource: " + resource);
+            Path target = Files.createTempFile(prefix, suffix);
+            Files.copy(input, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            return target;
+        }
+    }
+
+    private void deleteTemporaryFile(Path path, String label) {
+        if (path == null) return;
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException exception) {
+            LOG.warn("Could not delete temporary " + label + " file: " + path, exception);
+        }
+    }
+
+    private String stdinPrompt(String systemPrompt, String userPrompt, WorkspaceAccess workspaceAccess) {
+        StringBuilder prompt = new StringBuilder();
+        if (systemPrompt != null && !systemPrompt.isBlank()) {
+            prompt.append("<system_instructions>\n")
+                    .append(systemPrompt.strip())
+                    .append("\n</system_instructions>\n\n");
+        }
+        if (workspaceAccess == WorkspaceAccess.BOUNDED_EVIDENCE) {
+            prompt.append("<execution_constraints>\n")
+                    .append("Use only the evidence supplied below. Do not invoke tools or inspect repository files.\n")
+                    .append("</execution_constraints>\n\n");
+        } else if (workspaceAccess == WorkspaceAccess.READ_ONLY_REPOSITORY) {
+            prompt.append("<execution_constraints>\n")
+                    .append("Repository access is strictly read-only. Never create, edit, delete, move, or generate files.\n")
+                    .append("Complete the requested SOP in this one CLI session and return the final result directly.\n")
+                    .append("</execution_constraints>\n\n");
+        }
+        prompt.append("<user_request>\n")
+                .append(userPrompt == null ? "" : userPrompt)
+                .append("\n</user_request>\n");
+        return prompt.toString();
+    }
+
+    private String tomlString(String value) {
+        return "\"" + value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t") + "\"";
     }
 
     private boolean isStructuredBusinessStage(String stage) {
@@ -257,12 +399,15 @@ public final class LocalCliModelClient implements ModelClient {
             Process process,
             ProgressIndicator indicator,
             String stage,
-            Consumer<String> statusListener
+            Consumer<String> statusListener,
+            Consumer<ModelStreamEvent> streamListener,
+            ModelRunAuditLog.Run audit
     ) {
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)
         )) {
             StringBuilder output = new StringBuilder();
+            CodexStreamEventParser streamParser = new CodexStreamEventParser();
             String line;
             int events = 0;
             int toolCalls = 0;
@@ -272,6 +417,10 @@ public final class LocalCliModelClient implements ModelClient {
                     events++;
                     try {
                         JsonObject event = JsonParser.parseString(line).getAsJsonObject();
+                        audit.recordCodexEvent(event);
+                        for (ModelStreamEvent streamEvent : streamParser.accept(event)) {
+                            streamListener.accept(streamEvent);
+                        }
                         JsonObject item = event.has("item") && event.get("item").isJsonObject()
                                 ? event.getAsJsonObject("item")
                                 : null;

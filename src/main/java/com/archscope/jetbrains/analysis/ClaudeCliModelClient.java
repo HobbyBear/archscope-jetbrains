@@ -28,6 +28,15 @@ import java.util.function.Consumer;
 public final class ClaudeCliModelClient implements ModelClient {
     private static final Logger LOG = Logger.getInstance(ClaudeCliModelClient.class);
     private static final Duration MAX_RUNTIME = Duration.ofMinutes(30);
+    private final ModelRunAuditLog auditLog;
+
+    public ClaudeCliModelClient() {
+        this(new ModelRunAuditLog());
+    }
+
+    ClaudeCliModelClient(ModelRunAuditLog auditLog) {
+        this.auditLog = auditLog;
+    }
 
     @Override
     public String id() {
@@ -49,19 +58,48 @@ public final class ClaudeCliModelClient implements ModelClient {
             Consumer<String> statusListener,
             WorkspaceAccess workspaceAccess
     ) throws ModelClientException {
+        return complete(systemPrompt, userPrompt, workingDirectory, indicator, stage, statusListener,
+                workspaceAccess, ignored -> {});
+    }
+
+    @Override
+    public String complete(
+            String systemPrompt,
+            String userPrompt,
+            Path workingDirectory,
+            ProgressIndicator indicator,
+            String stage,
+            Consumer<String> statusListener,
+            WorkspaceAccess workspaceAccess,
+            Consumer<ModelStreamEvent> streamListener
+    ) throws ModelClientException {
         Process process = null;
+        Path systemPromptFile = null;
         long startedAt = System.nanoTime();
+        int resultChars = -1;
+        ModelRunAuditLog.Run audit = auditLog.start(
+                id(), stage, workingDirectory, workspaceAccess, systemPrompt, userPrompt);
         try {
-            List<String> command = command(workspaceAccess);
-            process = new ProcessBuilder(command)
+            if (!systemPrompt.isBlank()) {
+                systemPromptFile = Files.createTempFile("codebecause-claude-system-", ".txt");
+                Files.writeString(systemPromptFile, systemPrompt, StandardCharsets.UTF_8);
+            }
+            String outputSchema = isBusinessDomainSopStage(stage)
+                    ? resourceText("/prompts/business-domain-output-schema.json") : "";
+            List<String> command = command(workspaceAccess, systemPromptFile, outputSchema);
+            ProcessBuilder builder = new ProcessBuilder(command)
                     .directory(workingDirectory.toFile())
-                    .redirectErrorStream(true)
-                    .start();
+                    .redirectErrorStream(true);
+            CliCommandResolver.configureEnvironment(builder);
+            process = builder.start();
+            LOG.info("Claude CLI started: stage=" + stage + ", executable=" + command.get(0)
+                    + ", workingDirectory=" + workingDirectory.toAbsolutePath().normalize());
             updateProgress(indicator, statusListener, "Claude CLI · " + stage);
-            String prompt = systemPrompt + "\n\nUSER EVIDENCE REQUEST:\n" + userPrompt;
+            streamListener.accept(ModelStreamEvent.status("Claude CLI · " + stage));
+            String prompt = userPrompt;
             Process runningProcess = process;
             CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(
-                    () -> readOutput(runningProcess, indicator, stage, statusListener)
+                    () -> readOutput(runningProcess, indicator, stage, statusListener, streamListener, audit)
             );
             try (OutputStreamWriter writer = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8)) {
                 writer.write(prompt);
@@ -75,17 +113,18 @@ public final class ClaudeCliModelClient implements ModelClient {
                 );
             }
 
-            long deadline = System.nanoTime() + MAX_RUNTIME.toNanos();
+            Duration maxRuntime = workspaceAccess == WorkspaceAccess.READ_ONLY_REPOSITORY ? null : MAX_RUNTIME;
+            long deadline = maxRuntime == null ? Long.MAX_VALUE : System.nanoTime() + maxRuntime.toNanos();
             long lastProgressSecond = -5;
             while (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
                 if (indicator.isCanceled()) {
                     terminate(process);
                     indicator.checkCanceled();
                 }
-                if (System.nanoTime() > deadline) {
+                if (maxRuntime != null && System.nanoTime() > deadline) {
                     terminate(process);
-                    throw new ModelClientException(PluginLanguage.text("Claude CLI 执行超过 30 分钟，已终止",
-                            "Claude CLI exceeded 30 minutes and was terminated"));
+                    throw new ModelClientException(PluginLanguage.text("Claude CLI 执行超过 ", "Claude CLI exceeded ")
+                            + maxRuntime.toMinutes() + PluginLanguage.text(" 分钟，已终止", " minutes and was terminated"));
                 }
                 long elapsedSeconds = (System.nanoTime() - startedAt) / 1_000_000_000;
                 if (elapsedSeconds >= lastProgressSecond + 5) {
@@ -102,6 +141,8 @@ public final class ClaudeCliModelClient implements ModelClient {
                 );
             }
             String result = extractResult(output);
+            audit.recordResult(result);
+            resultChars = result.length();
             LOG.info("Claude CLI timing: stage=" + stage + ", promptChars=" + prompt.length()
                     + ", elapsedMs=" + ((System.nanoTime() - startedAt) / 1_000_000));
             return result;
@@ -125,12 +166,32 @@ public final class ClaudeCliModelClient implements ModelClient {
             );
         } finally {
             if (process != null && process.isAlive()) terminate(process);
+            if (systemPromptFile != null) {
+                try {
+                    Files.deleteIfExists(systemPromptFile);
+                } catch (IOException exception) {
+                    LOG.warn("Could not delete temporary Claude system prompt file: " + systemPromptFile, exception);
+                }
+            }
+            audit.finish(resultChars >= 0 ? "completed" : "failed",
+                    (System.nanoTime() - startedAt) / 1_000_000L, Math.max(0, resultChars));
+            audit.close();
         }
     }
 
     List<String> command(WorkspaceAccess workspaceAccess) {
+        return command(workspaceAccess, null);
+    }
+
+    List<String> command(WorkspaceAccess workspaceAccess, Path systemPromptFile) {
+        return command(workspaceAccess, systemPromptFile, "");
+    }
+
+    List<String> command(WorkspaceAccess workspaceAccess, Path systemPromptFile, String outputSchema) {
         boolean windows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
-        List<String> prefix = List.of("claude");
+        List<String> prefix = CliCommandResolver.resolve(
+                "claude", "archscope.claudeCliPath", "CLAUDE_CLI_PATH"
+        );
         if (windows) {
             String appData = System.getenv("APPDATA");
             if (appData != null) {
@@ -143,9 +204,45 @@ public final class ClaudeCliModelClient implements ModelClient {
                 "-p",
                 "--output-format", "stream-json",
                 "--verbose",
+                "--include-partial-messages",
                 "--no-session-persistence"
         ));
+        if (workspaceAccess == WorkspaceAccess.BOUNDED_EVIDENCE) {
+            command.addAll(List.of("--effort", "low"));
+            command.add("--tools");
+            command.add("");
+        } else if (workspaceAccess == WorkspaceAccess.READ_ONLY_REPOSITORY) {
+            command.addAll(List.of(
+                    "--permission-mode", "dontAsk",
+                    "--tools", "Read,Grep,Glob,Bash,Skill",
+                    "--disallowedTools", "Write,Edit,NotebookEdit"
+            ));
+        } else {
+            command.addAll(List.of("--effort", "medium"));
+        }
+        if (systemPromptFile != null) {
+            command.add("--system-prompt-file");
+            command.add(systemPromptFile.toString());
+        }
+        if (!outputSchema.isBlank()) {
+            command.add("--json-schema");
+            command.add(outputSchema);
+        }
         return List.copyOf(command);
+    }
+
+    private boolean isBusinessDomainSopStage(String stage) {
+        return stage.contains("业务分析 SOP")
+                || stage.contains("报告修改 SOP")
+                || stage.contains("business-analysis SOP")
+                || stage.contains("report-refinement SOP");
+    }
+
+    private String resourceText(String resource) throws IOException {
+        try (java.io.InputStream input = ClaudeCliModelClient.class.getResourceAsStream(resource)) {
+            if (input == null) throw new IOException("Missing resource: " + resource);
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 
     String extractResult(String output) throws ModelClientException {
@@ -204,18 +301,30 @@ public final class ClaudeCliModelClient implements ModelClient {
             Process process,
             ProgressIndicator indicator,
             String stage,
-            Consumer<String> statusListener
+            Consumer<String> statusListener,
+            Consumer<ModelStreamEvent> streamListener,
+            ModelRunAuditLog.Run audit
     ) {
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)
         )) {
             StringBuilder output = new StringBuilder();
+            ClaudeStreamEventParser streamParser = new ClaudeStreamEventParser();
             String line;
             int events = 0;
             while ((line = reader.readLine()) != null) {
                 output.append(line).append('\n');
                 if (line.stripLeading().startsWith("{")) {
                     events++;
+                    try {
+                        JsonObject event = JsonParser.parseString(line).getAsJsonObject();
+                        audit.recordClaudeEvent(event);
+                        for (ModelStreamEvent streamEvent : streamParser.accept(event)) {
+                            streamListener.accept(streamEvent);
+                        }
+                    } catch (RuntimeException ignored) {
+                        // Startup notices and future event variants do not affect the audit log.
+                    }
                     updateProgress(indicator, statusListener, "Claude CLI · " + stage
                             + PluginLanguage.text(" · 事件 ", " · event ") + events);
                 }

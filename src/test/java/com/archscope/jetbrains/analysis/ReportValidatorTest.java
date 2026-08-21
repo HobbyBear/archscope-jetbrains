@@ -162,6 +162,26 @@ final class ReportValidatorTest {
     }
 
     @Test
+    void acceptsInferredDataHopWithoutJumpableSource() throws Exception {
+        EvidencePack snapshot = new EvidencePack(
+                Path.of("/repo"), "head", "head", "head", "treehash", "domain-fingerprint",
+                List.of(), "", List.of(), List.of("src/App.java")
+        );
+        JsonObject response = JsonParser.parseString(businessDomainReport()).getAsJsonObject();
+        JsonObject hop = response.getAsJsonObject("flow_map").getAsJsonArray("children")
+                .get(0).getAsJsonObject().getAsJsonArray("data_flow").get(0).getAsJsonObject();
+        hop.addProperty("file", "");
+        hop.addProperty("evidence", "inferred");
+
+        JsonObject report = validator.validateRepository(
+                response.toString(), snapshot, workspace.resolve("repository"));
+
+        assertEquals("inferred", report.getAsJsonObject("flow_map").getAsJsonArray("children")
+                .get(0).getAsJsonObject().getAsJsonArray("data_flow").get(0).getAsJsonObject()
+                .get("evidence").getAsString());
+    }
+
+    @Test
     void normalizesGlobalDataFlowOrdersWithinEachLineage() throws Exception {
         EvidencePack snapshot = new EvidencePack(
                 Path.of("/repo"), "head", "head", "head", "treehash", "domain-fingerprint",

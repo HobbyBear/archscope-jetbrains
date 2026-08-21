@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "source": {
+      "type": "object",
+      "properties": {
+        "meaning": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough", "inferred"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+      },
+      "required": ["meaning", "file", "line", "symbol", "evidence", "confidence"],
+      "additionalProperties": false
+    },
+    "field_group": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["business_metric", "identity", "control", "audit_time", "content", "other"] },
+        "fields": { "type": "array", "items": { "type": "string" } },
+        "meaning": { "type": "string" }
+      },
+      "required": ["name", "role", "fields", "meaning"],
+      "additionalProperties": false
+    },
+    "business_object": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "plain_meaning": { "type": "string" },
+        "storage_kind": { "type": "string", "enum": ["payload", "struct", "table", "event", "config", "unknown"] },
+        "lifecycle": { "type": "string" },
+        "field_groups": { "type": "array", "items": { "$ref": "#/$defs/field_group" } },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough", "inferred"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+        "supporting_sources": { "type": "array", "items": { "$ref": "#/$defs/source" } }
+      },
+      "required": ["id", "name", "plain_meaning", "storage_kind", "lifecycle", "field_groups", "file", "line", "symbol", "evidence", "confidence", "supporting_sources"],
+      "additionalProperties": false
+    },
+    "actor": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "goal": { "type": "string" },
+        "enters_via": { "type": "string" }
+      },
+      "required": ["name", "goal", "enters_via"],
+      "additionalProperties": false
+    },
+    "domain_relationship": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "meaning": { "type": "string" }
+      },
+      "required": ["source", "target", "meaning"],
+      "additionalProperties": false
+    },
+    "term": {
+      "type": "object",
+      "properties": {
+        "term": { "type": "string" },
+        "plain_meaning": { "type": "string" },
+        "why_it_matters": { "type": "string" }
+      },
+      "required": ["term", "plain_meaning", "why_it_matters"],
+      "additionalProperties": false
+    },
+    "domain": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "purpose": { "type": "string" },
+        "why_here": { "type": "string" },
+        "actors": { "type": "array", "items": { "type": "string" } },
+        "owns": { "type": "array", "items": { "type": "string" } },
+        "receives": { "type": "array", "items": { "type": "string" } },
+        "produces": { "type": "array", "items": { "type": "string" } },
+        "not_responsible": { "type": "array", "items": { "type": "string" } },
+        "depends_on": { "type": "array", "items": { "type": "string" } },
+        "source_step_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      },
+      "required": ["id", "name", "purpose", "why_here", "actors", "owns", "receives", "produces", "not_responsible", "depends_on", "source_step_ids"],
+      "additionalProperties": false
+    },
+    "entry_source": {
+      "type": "object",
+      "properties": {
+        "step_id": { "type": "string" },
+        "entry_kind": { "type": "string", "enum": ["route", "job_registration", "event_consumer", "public_caller", "command", "external_boundary"] },
+        "meaning": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough", "inferred"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+      },
+      "required": ["step_id", "entry_kind", "meaning", "file", "line", "symbol", "evidence", "confidence"],
+      "additionalProperties": false
+    },
+    "origin": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "role": { "type": "string", "enum": ["primary", "control", "lookup", "configuration"] },
+        "data": { "type": "string" },
+        "meaning": { "type": "string" },
+        "source_kind": { "type": "string", "enum": ["api", "import", "event", "job", "database", "config", "generated", "external", "unknown"] },
+        "source": { "type": "string" },
+        "entry": { "type": "string" },
+        "owner": { "type": "string" },
+        "joins_step_id": { "type": "string" },
+        "upstream_producer_status": { "type": "string", "enum": ["confirmed", "unknown"] },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough", "inferred"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+      },
+      "required": ["id", "role", "data", "meaning", "source_kind", "source", "entry", "owner", "joins_step_id", "upstream_producer_status", "file", "line", "symbol", "evidence", "confidence"],
+      "additionalProperties": false
+    },
+    "hop": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "lineage_id": { "type": "string" },
+        "order": { "type": "integer", "minimum": 1 },
+        "step_id": { "type": "string" },
+        "phase": { "type": "string", "enum": ["ingest", "validate", "transform", "persist", "deliver"] },
+        "timing": { "type": "string", "enum": ["same_execution", "async_continuation"] },
+        "plain_action": { "type": "string" },
+        "data": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "via": { "type": "string", "enum": ["http", "call", "event", "sql", "file", "memory", "websocket", "job"] },
+        "transformation": { "type": "string" },
+        "storage": { "type": "string" },
+        "consumer": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough", "inferred"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+      },
+      "required": ["id", "lineage_id", "order", "step_id", "phase", "timing", "plain_action", "data", "from", "to", "via", "transformation", "storage", "consumer", "file", "line", "symbol", "evidence", "confidence"],
+      "additionalProperties": false
+    },
+    "consumer": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "meaning": { "type": "string" },
+        "after_step_id": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough", "inferred"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+      },
+      "required": ["name", "meaning", "after_step_id", "file", "line", "symbol", "evidence", "confidence"],
+      "additionalProperties": false
+    },
+    "branch": {
+      "type": "object",
+      "properties": {
+        "label": { "type": "string" },
+        "outcome": { "type": "string", "enum": ["continue", "success", "failure", "cancel", "terminal"] },
+        "meaning": { "type": "string" },
+        "target_step_id": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+      },
+      "required": ["label", "outcome", "meaning", "target_step_id", "file", "line", "symbol", "evidence", "confidence"],
+      "additionalProperties": false
+    },
+    "state_effect": {
+      "type": "object",
+      "properties": {
+        "state": { "type": "string" },
+        "effect": { "type": "string", "enum": ["created", "incremented", "decremented", "deleted", "unchanged", "not_created", "event_emitted", "event_not_emitted"] },
+        "when": { "type": "string" },
+        "meaning": { "type": "string" }
+      },
+      "required": ["state", "effect", "when", "meaning"],
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "kind": { "type": "string", "enum": ["stage", "decision", "success", "failure"] },
+        "main_path_label": { "type": "string" },
+        "execution": { "type": "string", "enum": ["same_execution", "async_continuation"] },
+        "domain_id": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "symbol": { "type": "string" },
+        "node_kind": { "type": "string", "enum": ["function", "method", "module", "service", "interface", "struct", "table"] },
+        "inputs": { "type": "array", "items": { "type": "string" } },
+        "outputs": { "type": "array", "items": { "type": "string" } },
+        "relation_kind": { "type": "string", "enum": ["call", "data", "http", "websocket", "event", "sql", "transaction", "reads", "writes"] },
+        "relation_label": { "type": "string" },
+        "evidence": { "type": "string", "enum": ["direct_source", "source_backed_walkthrough", "inferred"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+        "business_rules": { "type": "array", "items": { "type": "string" } },
+        "branches": { "type": "array", "items": { "$ref": "#/$defs/branch" } },
+        "supporting_sources": { "type": "array", "items": { "$ref": "#/$defs/source" } },
+        "state_effects": { "type": "array", "items": { "$ref": "#/$defs/state_effect" } }
+      },
+      "required": ["id", "title", "summary", "kind", "main_path_label", "execution", "domain_id", "file", "line", "symbol", "node_kind", "inputs", "outputs", "relation_kind", "relation_label", "evidence", "confidence", "business_rules", "branches", "supporting_sources", "state_effects"],
+      "additionalProperties": false
+    },
+    "flow": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "domain_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "flow_type": { "type": "string", "enum": ["request", "job", "event", "command"] },
+        "execution_scope": { "type": "string", "const": "single_trigger" },
+        "actor": { "type": "string" },
+        "trigger": { "type": "string" },
+        "routing_condition": { "type": "string" },
+        "preconditions": { "type": "array", "items": { "type": "string" } },
+        "outcome": { "type": "string" },
+        "end_title": { "type": "string" },
+        "entry_source": { "$ref": "#/$defs/entry_source" },
+        "data_subject": { "type": "string" },
+        "primary_origin_id": { "type": "string" },
+        "data_reads": { "type": "array", "items": { "type": "string" } },
+        "data_writes": { "type": "array", "items": { "type": "string" } },
+        "failure_paths": { "type": "array", "items": { "type": "string" } },
+        "business_rules": { "type": "array", "items": { "type": "string" } },
+        "data_origins": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/origin" } },
+        "data_flow": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/hop" } },
+        "consumer_targets": { "type": "array", "items": { "$ref": "#/$defs/consumer" } },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+      },
+      "required": ["id", "domain_ids", "title", "summary", "flow_type", "execution_scope", "actor", "trigger", "routing_condition", "preconditions", "outcome", "end_title", "entry_source", "data_subject", "primary_origin_id", "data_reads", "data_writes", "failure_paths", "business_rules", "data_origins", "data_flow", "consumer_targets", "steps"],
+      "additionalProperties": false
+    },
+    "unknown": {
+      "type": "object",
+      "properties": {
+        "question": { "type": "string" },
+        "kind": { "type": "string", "enum": ["entry", "origin", "rule", "state", "event", "outcome"] },
+        "flow_id": { "type": "string" },
+        "symbols": { "type": "array", "maxItems": 3, "items": { "type": "string" } },
+        "why_material": { "type": "string" }
+      },
+      "required": ["question", "kind", "flow_id", "symbols", "why_material"],
+      "additionalProperties": false
+    },
+    "revision": {
+      "type": "object",
+      "properties": {
+        "instruction": { "type": "string" },
+        "summary": { "type": "string" }
+      },
+      "required": ["instruction", "summary"],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": { "type": "string", "const": "closed-business-domain-analysis/v1" },
+    "title": { "type": "string" },
+    "summary": { "type": "string" },
+    "refinement_intent": {
+      "type": "object",
+      "properties": {
+        "operations": { "type": "array", "items": { "type": "string" } },
+        "target_domain_ids": { "type": "array", "items": { "type": "string" } },
+        "target_flow_ids": { "type": "array", "items": { "type": "string" } },
+        "target_step_ids": { "type": "array", "items": { "type": "string" } },
+        "requested_topics": { "type": "array", "items": { "type": "string" } },
+        "evidence_required": { "type": "boolean" }
+      },
+      "required": ["operations", "target_domain_ids", "target_flow_ids", "target_step_ids", "requested_topics", "evidence_required"],
+      "additionalProperties": false
+    },
+    "business_overview": {
+      "type": "object",
+      "properties": {
+        "purpose": { "type": "string" },
+        "primary_actor": { "type": "string" },
+        "plain_story": { "type": "array", "items": { "type": "string" } },
+        "actors": { "type": "array", "items": { "$ref": "#/$defs/actor" } },
+        "domain_relationships": { "type": "array", "items": { "$ref": "#/$defs/domain_relationship" } },
+        "terms": { "type": "array", "items": { "$ref": "#/$defs/term" } },
+        "business_objects": { "type": "array", "items": { "$ref": "#/$defs/business_object" } },
+        "reading_order": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["purpose", "primary_actor", "plain_story", "actors", "domain_relationships", "terms", "business_objects", "reading_order"],
+      "additionalProperties": false
+    },
+    "domains": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/domain" } },
+    "flows": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/flow" } },
+    "unknowns": { "type": "array", "items": { "$ref": "#/$defs/unknown" } },
+    "revision_history": { "type": "array", "items": { "$ref": "#/$defs/revision" } }
+  },
+  "required": ["schema", "title", "summary", "refinement_intent", "business_overview", "domains", "flows", "unknowns", "revision_history"],
+  "additionalProperties": false
+}

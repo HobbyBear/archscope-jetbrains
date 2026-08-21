@@ -9,12 +9,57 @@ import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class PromptBuilderTest {
+    @Test
+    void boundsRepositoryHintsAndLargeEvidencePayloads() throws Exception {
+        List<String> manifest = new ArrayList<>();
+        for (int index = 0; index < 1_200; index++) manifest.add("src/module" + index + "/handler.go");
+        EvidencePack evidence = new EvidencePack(
+                Path.of("/repo"), "head", "head", "head", "tree", "fingerprint",
+                List.of(), "", List.of(), manifest
+        );
+        AnalysisRequest request = AnalysisRequest.businessDomain(Path.of("/repo"), "分析处理流程");
+        PromptBuilder builder = new PromptBuilder();
+
+        JsonObject planning = JsonParser.parseString(
+                builder.businessDomainPlanningPrompt(request, evidence, "", "")
+        ).getAsJsonObject();
+        assertEquals(600, planning.getAsJsonArray("repository_path_index").size());
+        assertTrue(planning.get("repository_path_index_truncated").getAsBoolean());
+
+        String largeEvidence = """
+                {"schema":"business-domain-source-evidence/v1","query_results":[
+                  {"literal":"Handle","role":"entry","reason":"locate entry","matches":[
+                    {"path":"src/module0/handler.go","matched_line":1,"snippet":"%s"}]}],
+                 "candidate_excerpts":[{"path":"src/module0/handler.go","excerpt":"%s"}],
+                 "control_flow_excerpts":[{"path":"src/module0/handler.go","matched_lines":[1],"excerpt":"%s"}]}
+                """.formatted("q".repeat(20_000), "c".repeat(30_000), "f".repeat(120_000));
+
+        assertTrue(PromptBuilder.compactSourceEvidence(largeEvidence, 72_000).toString().length() <= 72_100);
+        assertTrue(PromptBuilder.compactSourceEvidence(largeEvidence, 24_000).toString().length() <= 24_100);
+        assertTrue(PromptBuilder.compactSourceEvidence(largeEvidence, 36_000).toString().length() <= 36_100);
+
+        DomainEvidencePlan plan = DomainEvidencePlan.parse("""
+                {"schema":"business-domain-evidence-plan/v1",
+                 "candidate_paths":["src/module0/handler.go"],"queries":[]}
+                """, evidence);
+        JsonObject synthesis = JsonParser.parseString(
+                builder.businessDomainFinalPrompt(request, evidence, plan, largeEvidence)
+        ).getAsJsonObject();
+        JsonObject repair = JsonParser.parseString(
+                builder.businessDomainRepairPrompt(request, evidence, plan, largeEvidence, "broken", "invalid")
+        ).getAsJsonObject();
+        assertTrue(synthesis.getAsJsonObject("source_evidence").toString().length() <= 72_100);
+        assertTrue(repair.getAsJsonObject("source_evidence").toString().length() <= 24_100);
+    }
+
     @Test
     void businessDomainSynthesisRequestsTextSlotsInsteadOfReportJson() throws Exception {
         AnalysisRequest request = AnalysisRequest.businessDomain(Path.of("/repo"), "分析聊天逻辑");
@@ -44,6 +89,9 @@ final class PromptBuilderTest {
         assertTrue(prompt.contains("No JSON"));
         assertTrue(system.contains("STEP_n_DOMAIN_ID"));
         assertTrue(system.contains("STEP_n_FLOW_KEY"));
+        assertTrue(system.contains("PRIMARY_FLOW_KEY"));
+        assertTrue(system.contains("primary, supporting, or exclude"));
+        assertTrue(system.contains("STEP_n_FAILURE"));
         assertTrue(prompt.contains("text_slot_source_bindings"));
         assertTrue(prompt.contains("src/chat.go"));
     }
@@ -97,15 +145,15 @@ final class PromptBuilderTest {
         JsonObject prompt = JsonParser.parseString(builder.businessDomainPrompt(request, evidence)).getAsJsonObject();
         assertTrue(prompt.get("analysis_focus").getAsString().contains("聊天"));
         assertTrue(prompt.getAsJsonObject("required_comparison").get("mode").getAsString().equals("current_snapshot"));
+        assertTrue(prompt.has("single_session_sop"));
+        assertTrue(prompt.has("acceptance_checklist"));
+        assertTrue(prompt.get("model_turn_contract").getAsString().contains("only model turn"));
         assertFalse(prompt.toString().contains("Codex"));
         assertTrue(builder.businessDomainSystemPrompt().contains("closed-business-domain-analysis/v1"));
-        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("complete enclosing function bodies"));
-        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("producer-to-"));
-        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("actual route/job registration"));
-        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("OPERATIONS<TAB>"));
-        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("not JSON"));
-        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("supplement_domain"));
-        assertTrue(builder.businessDomainPlanningSystemPrompt().contains("add_nodes"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("only model turn"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("contract below"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("supplement_domain"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("add_nodes"));
         assertTrue(builder.businessDomainSystemPrompt().contains("later independent reader"));
         assertTrue(builder.businessDomainSystemPrompt().contains("graph-edit command"));
         assertTrue(builder.businessDomainSystemPrompt().contains("add, remove, move, or reorder nodes"));
@@ -115,19 +163,12 @@ final class PromptBuilderTest {
         assertTrue(builder.businessDomainSystemPrompt().contains("Never promote a getter, finder, loader, router lookup"));
         assertTrue(builder.businessDomainSystemPrompt().contains("legitimate atomic actor goal may have one"));
         assertTrue(builder.businessDomainSystemPrompt().contains("Never invent, duplicate, or mechanically"));
-        assertTrue(builder.businessDomainSystemPrompt().contains("return [] when the bounded evidence proves no specific exclusion"));
-        assertTrue(builder.businessDomainResolutionSystemPrompt().contains("business-domain-evidence-resolution/v1"));
-        assertTrue(builder.businessDomainPatchSystemPrompt().contains("business-domain-refinement-patch/v1"));
-        assertTrue(builder.businessDomainPatchSystemPrompt().contains("requires_structural_rebuild"));
+        assertTrue(builder.businessDomainSystemPrompt().contains("return [] when inspected evidence proves no specific exclusion"));
         assertTrue(builder.refinementSystemPrompt().contains("follow_up_instruction"));
-
-        DomainEvidencePlan emptyPlan = DomainEvidencePlan.parse(
-                "{\"schema\":\"business-domain-evidence-plan/v1\",\"candidate_paths\":[],\"queries\":[]}", evidence);
-        String refinement = builder.businessDomainRefinementPrompt(
-                request, evidence, "{}", "新增一个通知节点", emptyPlan,
-                "{\"candidate_excerpts\":[],\"query_results\":[]}");
-        assertTrue(refinement.contains("acceptance_rule"));
-        assertTrue(refinement.contains("explicit graph edit"));
+        String refinement = builder.businessDomainSopRefinementPrompt(
+                request, evidence, "{}", "新增一个通知节点");
+        assertTrue(refinement.contains("refinement_output_rule"));
+        assertTrue(refinement.contains("complete replacement"));
     }
 
     @Test
@@ -164,37 +205,48 @@ final class PromptBuilderTest {
     }
 
     @Test
-    void includesCustomGuidanceAndProtectsTheCoreSystemContract() throws Exception {
+    void injectsTheProjectSystemPromptIntoEveryModelSystemLayer() throws Exception {
         EvidencePack evidence = new EvidencePack(
                 Path.of("/repo"), "abc", "abc", "abc", "tree", "fingerprint",
                 List.of(), "", List.of(), List.of("src/creator.go")
         );
         AnalysisGuidance guidance = new AnalysisGuidance(
-                "创作者来自运营导入。必须追到首次落库和最终消费者。", "先展示数据流"
+                "创作者来自运营导入。必须追到首次落库和最终消费者。先展示数据流"
         );
         AnalysisRequest request = AnalysisRequest.businessDomain(Path.of("/repo"), "分析创作者", guidance);
         PromptBuilder builder = new PromptBuilder();
 
         JsonObject prompt = JsonParser.parseString(builder.businessDomainPrompt(request, evidence)).getAsJsonObject();
-        assertTrue(prompt.getAsJsonObject("project_guidance").get("custom_instructions").getAsString()
-                .contains("运营导入"));
-        assertTrue(prompt.getAsJsonObject("project_guidance").get("custom_instructions").getAsString()
-                .contains("最终消费者"));
+        assertFalse(prompt.has("project_guidance"));
         String system = builder.businessDomainSystemPrompt(request);
+        assertTrue(system.contains("创作者来自运营导入"));
+        assertTrue(system.contains("必须追到首次落库和最终消费者"));
         assertTrue(system.contains("先展示数据流"));
-        assertTrue(system.contains("override the required JSON schema"));
+        assertTrue(system.contains("Follow them strictly"));
+        assertTrue(system.contains("Do not silently weaken"));
+        assertTrue(system.contains("current repository"));
+        assertTrue(system.contains("normal local CLI configuration"));
+        assertTrue(system.contains("Only real source-code locations"));
+        assertFalse(system.contains("RepoMind"));
+        assertFalse(system.contains("OpenSpec"));
 
         DomainEvidencePlan plan = DomainEvidencePlan.parse("""
                 {"schema":"business-domain-evidence-plan/v1","candidate_paths":["src/creator.go"],
                  "queries":[{"literal":"CreatorLevel","role":"state","reason":"定位等级"}]}
                 """, evidence);
         String sourceEvidence = "{\"candidate_excerpts\":[],\"query_results\":[]}";
-        assertTrue(builder.businessDomainFinalPrompt(request, evidence, plan, sourceEvidence)
+        assertTrue(builder.businessDomainPlanningSystemPrompt(request).contains("必须追到首次落库和最终消费者"));
+        assertTrue(builder.businessDomainResolutionSystemPrompt(request).contains("必须追到首次落库和最终消费者"));
+        assertTrue(builder.boundedBusinessDomainSystemPrompt(request).contains("Do not search the repository"));
+        assertTrue(builder.boundedBusinessDomainResolutionSystemPrompt(request).contains("Do not search the repository"));
+        assertTrue(builder.businessDomainPatchSystemPrompt(request).contains("必须追到首次落库和最终消费者"));
+        assertTrue(builder.refinementSystemPrompt(request).contains("必须追到首次落库和最终消费者"));
+        assertFalse(builder.businessDomainFinalPrompt(request, evidence, plan, sourceEvidence)
                 .contains("必须追到首次落库和最终消费者"));
-        assertTrue(builder.businessDomainRepairPrompt(
+        assertFalse(builder.businessDomainRepairPrompt(
                 request, evidence, plan, sourceEvidence, "broken", "invalid")
                 .contains("必须追到首次落库和最终消费者"));
-        assertTrue(builder.businessDomainRefinementPrompt(
+        assertFalse(builder.businessDomainRefinementPrompt(
                 request, evidence, "{}", "补充等级变更", plan, sourceEvidence)
                 .contains("必须追到首次落库和最终消费者"));
     }

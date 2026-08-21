@@ -6,7 +6,8 @@ import java.util.regex.Pattern;
 
 public final class SensitiveTextSanitizer {
     private static final List<Pattern> SECRET_PATTERNS = List.of(
-            Pattern.compile("(?i)(api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\\s*[:=]\\s*['\\\"]?[^'\\\"\\s,;]{6,}"),
+            Pattern.compile("(?i)(api[_-]?key|access[_-]?token|client[_-]?secret|authorization|password|passwd)\\s*[:=]\\s*['\\\"]?[^'\\\"\\s,;]{6,}"),
+            Pattern.compile("(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]{8,}"),
             Pattern.compile("\\bsk-[A-Za-z0-9_-]{16,}\\b"),
             Pattern.compile("\\bgh[opsu]_[A-Za-z0-9]{20,}\\b"),
             Pattern.compile("-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----")

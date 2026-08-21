@@ -9,12 +9,14 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DomainReportAssemblerTest {
     @Test
     void expandsCompactBusinessSemanticsIntoACompleteReport() throws Exception {
-        AnalysisRequest request = AnalysisRequest.businessDomain(Path.of("/repo"), "分析聊天逻辑");
+        AnalysisRequest request = AnalysisRequest.businessDomain(Path.of("/repo"), "分析聊天逻辑")
+                .withCliWorkingDirectory(Path.of("/repo/src"));
         EvidencePack evidence = new EvidencePack(
                 Path.of("/repo"), "head", "head", "head", "tree", "fingerprint",
                 List.of(), "", List.of(), List.of("src/chat.go")
@@ -45,7 +47,7 @@ final class DomainReportAssemblerTest {
                    "consumer_targets":[{"name":"历史查询","meaning":"稍后的独立请求读取已保存回答","after_step_id":"missing-consumer-step","file":"src/chat.go","line":1,"symbol":"reply","evidence":"direct_source","confidence":"high"}],
                    "steps":[
                      {"id":"s1","title":"接收","summary":"接收消息","kind":"stage","execution":"same_execution","domain_id":"entry","file":"src/chat.go","line":1,"symbol":"accept","node_kind":"method","inputs":[],"outputs":[],"relation_kind":"call","relation_label":"接收","evidence":"direct_source","confidence":"high","business_rules":[],"branches":[]},
-                     {"id":"s2","title":"校验","summary":"校验消息","kind":"decision","execution":"same_execution","domain_id":"entry","file":"src/chat.go","line":1,"symbol":"validate","node_kind":"method","inputs":[],"outputs":[],"relation_kind":"call","relation_label":"校验","evidence":"direct_source","confidence":"high","business_rules":[],"branches":[],"state_effects":[{"state":"inproc","effect":"decremented","when":"拒绝","meaning":"释放处理中名额"}]},
+                     {"id":"s2","title":"校验","summary":"校验消息","kind":"decision","execution":"same_execution","domain_id":"entry","file":"src/chat.go","line":1,"symbol":"validate","node_kind":"method","inputs":[],"outputs":[],"relation_kind":"call","relation_label":"校验","evidence":"direct_source","confidence":"high","business_rules":[],"branches":[{"label":"拒绝","outcome":"continue","meaning":"跳过生成并直接返回","target_step_id":"s4","file":"src/chat.go","line":1,"symbol":"validate","evidence":"direct_source","confidence":"high"}],"state_effects":[{"state":"inproc","effect":"decremented","when":"拒绝","meaning":"释放处理中名额"}]},
                      {"id":"s3","title":"生成","summary":"生成回答","kind":"stage","execution":"same_execution","domain_id":"runtime","file":"src/chat.go","line":1,"symbol":"generate","node_kind":"method","inputs":[],"outputs":[],"relation_kind":"call","relation_label":"调用模型","evidence":"direct_source","confidence":"high","business_rules":[],"branches":[],"supporting_sources":[{"meaning":"回答传输边界","file":"src/chat.go","line":1,"symbol":"reply","evidence":"direct_source","confidence":"high"}]},
                      {"id":"s4","title":"返回","summary":"返回回答","kind":"success","execution":"same_execution","domain_id":"entry","file":"src/chat.go","line":1,"symbol":"reply","node_kind":"method","inputs":[],"outputs":[],"relation_kind":"data","relation_label":"交付","evidence":"direct_source","confidence":"high","business_rules":[],"branches":[]}]}],
                  "unknowns":[{"question":"source_evidence 未展示上游生产者","kind":"origin","flow_id":"chat-flow","symbols":["accept"],"why_material":"无法确认问题进入客户端前的生产者"}],"revision_history":[]}
@@ -58,6 +60,17 @@ final class DomainReportAssemblerTest {
         duplicatePrimary.addProperty("role", "primary");
         compactJson.getAsJsonArray("flows").get(0).getAsJsonObject()
                 .getAsJsonArray("data_origins").add(duplicatePrimary);
+        JsonObject sourceFlow = compactJson.getAsJsonArray("flows").get(0).getAsJsonObject();
+        sourceFlow.getAsJsonObject("entry_source").addProperty("step_id", "s3");
+        sourceFlow.getAsJsonArray("data_flow").get(0).getAsJsonObject().remove("file");
+        sourceFlow.getAsJsonArray("data_flow").get(0).getAsJsonObject().remove("symbol");
+        JsonObject sourceBranch = sourceFlow.getAsJsonArray("steps").get(1).getAsJsonObject()
+                .getAsJsonArray("branches").get(0).getAsJsonObject();
+        sourceFlow.getAsJsonArray("steps").get(1).getAsJsonObject().addProperty("file", "chat.go");
+        sourceBranch.remove("file");
+        sourceBranch.remove("line");
+        sourceBranch.remove("symbol");
+        sourceBranch.remove("evidence");
 
         JsonObject report = new DomainReportAssembler().assemble(compactJson.toString(), request, evidence);
 
@@ -94,5 +107,28 @@ final class DomainReportAssemblerTest {
                 report.getAsJsonArray("unknowns").get(0).getAsJsonObject().get("question").getAsString());
         assertEquals(2, report.getAsJsonObject("flow_map").getAsJsonArray("children").get(0).getAsJsonObject()
                 .getAsJsonArray("children").get(2).getAsJsonObject().getAsJsonArray("source_node_ids").size());
+        assertEquals("domain-step-1-4", report.getAsJsonObject("flow_map").getAsJsonArray("children")
+                .get(0).getAsJsonObject().getAsJsonArray("children").get(1).getAsJsonObject()
+                .getAsJsonArray("branches").get(0).getAsJsonObject().get("target_id").getAsString());
+        JsonObject assembledFlow = report.getAsJsonObject("flow_map").getAsJsonArray("children")
+                .get(0).getAsJsonObject();
+        assertEquals("domain-step-1-1", assembledFlow.getAsJsonObject("entry_source")
+                .get("step_id").getAsString());
+        JsonObject assembledBranch = assembledFlow.getAsJsonArray("children").get(1).getAsJsonObject()
+                .getAsJsonArray("branches").get(0).getAsJsonObject();
+        assertEquals("src/chat.go", assembledBranch.get("file").getAsString());
+        assertEquals("validate", assembledBranch.get("symbol").getAsString());
+        assertEquals("direct_source", assembledBranch.get("evidence").getAsString());
+        JsonObject assembledHop = assembledFlow.getAsJsonArray("data_flow").get(0).getAsJsonObject();
+        assertEquals("src/chat.go", assembledHop.get("file").getAsString());
+        assertEquals("accept", assembledHop.get("symbol").getAsString());
+        assertEquals("direct_source", assembledHop.get("evidence").getAsString());
+
+        EvidencePack documentationEvidence = new EvidencePack(
+                Path.of("/repo"), "head", "head", "head", "tree", "fingerprint",
+                List.of(), "", List.of(), List.of("docs/chat-design.md")
+        );
+        assertThrows(ModelClientException.class, () -> new DomainReportAssembler().assemble(
+                compactJson.toString().replace("src/chat.go", "docs/chat-design.md"), request, documentationEvidence));
     }
 }

@@ -1,11 +1,11 @@
 <idea-plugin>
     <id>com.codebecause.jetbrains</id>
     <name>CodeBecause</name>
-    <vendor>CodeBecause</vendor>
+    <vendor email="18881934641@163.com" url="https://github.com/HobbyBear/archscope-jetbrains">CodeBecause</vendor>
 
     <description><![CDATA[
-        Analyze selected Git changes or a user-defined business topic, then refine the resulting
-        business-domain and end-to-end flow report interactively. Model execution is provider-neutral;
+        Analyze a user-defined business topic, then refine the resulting business-domain and end-to-end
+        flow report interactively. Model execution is provider-neutral;
         the bundled default adapter uses an authenticated local Codex CLI.
     ]]></description>
 
@@ -18,6 +18,9 @@
                 anchor="right"
                 icon="/icons/codebecause.svg"
                 factoryClass="com.archscope.jetbrains.ui.ArchitectureToolWindowFactory"/>
+        <codeInsight.lineMarkerProvider
+                language="go"
+                implementationClass="com.archscope.jetbrains.ui.FunctionFlowLineMarkerProvider"/>
     </extensions>
 
     <actions>
@@ -25,16 +28,22 @@
                 id="ArchScope.OpenToolWindow"
                 class="com.archscope.jetbrains.ui.OpenArchScopeAction"
                 text="Open CodeBecause"
-                description="Select Git commits and generate an architecture review">
+                description="Open CodeBecause business analysis">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
         <action
-                id="ArchScope.AnalyzeGitLogSelection"
-                class="com.archscope.jetbrains.ui.AnalyzeGitLogSelectionAction"
-                text="Analyze Selected Commits with AI"
-                description="Analyze one or more commits selected in the Git log"
-                icon="/icons/codebecause.svg">
-            <add-to-group group-id="Vcs.Log.ContextMenu" anchor="last"/>
+                id="CodeBecause.AnalyzeFunctionFlow"
+                class="com.archscope.jetbrains.ui.AnalyzeFunctionFlowAction"
+                text="Analyze Function Business Flow"
+                description="Analyze the selected function and its callees as a detailed business flow">
+            <add-to-group group-id="EditorPopupMenu" anchor="first"/>
+        </action>
+        <action
+                id="CodeBecause.ShowFunctionAnalysisRun"
+                class="com.archscope.jetbrains.ui.ShowFunctionAnalysisRunAction"
+                text="Show Live Analysis"
+                description="Reopen the active business or function analysis stream">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
     </actions>
 </idea-plugin>
